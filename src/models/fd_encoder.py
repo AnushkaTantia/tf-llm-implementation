@@ -1,15 +1,8 @@
 """
 Frequency-Domain (FD) Encoder for TF-LLM.
 
-Implements the FD branch described in Section 3.1 of the paper:
-    - Real FFT (torch.fft.rfft) to obtain spectral representation
-    - RevIN normalization applied to spectral magnitude (Kim et al., 2022)
-    - Linear projection into embedding space (d_emb=64)
-    - Frequency-domain augmentation: phase perturbation + amplitude
-      zeroing/boosting on randomly selected frequency bands
-
-Operates on the *raw* (unpatched) input sequence, since FFT needs the full
-time series to extract meaningful frequency components.
+Each variable's spectrum is projected and encoded with
+SHARED weights, independently of other variables.
 """
 
 import random
@@ -20,12 +13,9 @@ import torch.nn as nn
 
 class RevIN(nn.Module):
     """
-    Reversible Instance Normalization, applied here to spectral magnitude
-    rather than raw time series (per TF-LLM paper's usage).
-
-    Normalizes per-sample (per instance) using its own mean/std, with
-    learnable affine parameters. Standardizes spectra with different
-    global characteristics into a comparable distribution.
+    Reversible Instance Normalization applied to spectral magnitude,
+    per-variable (affine params indexed by variable), matching the
+    paper's usage (Kim et al., 2022, applied to spectral features here).
     """
 
     def __init__(self, num_features, eps=1e-5, affine=True):
@@ -38,10 +28,9 @@ class RevIN(nn.Module):
             self.affine_bias = nn.Parameter(torch.zeros(num_features))
 
     def forward(self, x):
-        # x: (batch, freq_bins, num_features)
+        # x: (batch, freq_bins, num_variables)
         mean = x.mean(dim=1, keepdim=True)
         std = (x.var(dim=1, keepdim=True, unbiased=False) + self.eps).sqrt()
-
         x_norm = (x - mean) / std
         if self.affine:
             x_norm = x_norm * self.affine_weight + self.affine_bias
@@ -50,10 +39,10 @@ class RevIN(nn.Module):
 
 class FDEncoder(nn.Module):
     """
-    Converts a raw time series into a frequency-domain embedding.
+    Channel-independent frequency-domain encoder.
 
-    Input:  x of shape (batch, seq_len, num_features)
-    Output: z of shape (batch, d_emb)
+    Input:  x of shape (batch, seq_len, num_variables)
+    Output: z (batch, d_emb), freq_embeddings (batch, freq_bins, num_variables, d_emb)
     """
 
     def __init__(self, seq_len=512, num_features=7, d_emb=64, n_heads=4, n_layers=2, dropout=0.2):
@@ -61,16 +50,15 @@ class FDEncoder(nn.Module):
         self.seq_len = seq_len
         self.num_features = num_features
         self.d_emb = d_emb
-
-        # rfft output length for a real signal of length seq_len
         self.freq_bins = seq_len // 2 + 1
 
         self.revin = RevIN(num_features)
 
-        # project each frequency bin's per-feature magnitude to d_emb,
-        # then use a small transformer over frequency bins (analogous to
-        # the TD encoder's transformer over patches)
-        self.freq_proj = nn.Linear(num_features, d_emb)
+        # shared linear projection: one scalar magnitude value -> d_emb,
+        # applied identically to every variable (channel-independent)
+        self.freq_proj = nn.Linear(1, d_emb)
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, self.freq_bins, 1, d_emb) * 0.02)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_emb,
@@ -86,25 +74,46 @@ class FDEncoder(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: (batch, seq_len, num_features) — raw (unpatched) input sequence
+            x: (batch, seq_len, num_variables) — raw (unpatched) input sequence
         Returns:
-            z: (batch, d_emb)
-            freq_embeddings: (batch, freq_bins, d_emb)
+            z: (batch, d_emb) — pooled over freq bins and variables
+            freq_embeddings: (batch, freq_bins, num_variables, d_emb)
         """
-        # real FFT along the time dimension
-        spectrum = torch.fft.rfft(x, dim=1)          # complex, (batch, freq_bins, num_features)
-        magnitude = spectrum.abs()                     # (batch, freq_bins, num_features)
+        batch, seq_len, num_variables = x.shape
+
+        spectrum = torch.fft.rfft(x, dim=1)     # (batch, freq_bins, num_variables), complex
+        magnitude = spectrum.abs()                # (batch, freq_bins, num_variables)
 
         magnitude = self.revin(magnitude)
 
-        freq_embeddings = self.freq_proj(magnitude)    # (batch, freq_bins, d_emb)
-        freq_embeddings = self.dropout(freq_embeddings)
+        # move variables next to batch for channel-independent processing
+        mag = magnitude.permute(0, 2, 1)           # (batch, num_variables, freq_bins)
+        mag = mag.reshape(batch * num_variables, self.freq_bins, 1)
 
-        freq_embeddings = self.transformer(freq_embeddings)  # (batch, freq_bins, d_emb)
+        emb = self.freq_proj(mag)                  # (batch*num_variables, freq_bins, d_emb)
+        emb = self.dropout(emb)
 
-        z = freq_embeddings.mean(dim=1)                 # (batch, d_emb)
+        emb = self.transformer(emb)                # (batch*num_variables, freq_bins, d_emb)
+
+        emb = emb.reshape(batch, num_variables, self.freq_bins, self.d_emb)
+        emb = emb.permute(0, 2, 1, 3)               # (batch, freq_bins, num_variables, d_emb)
+        emb = emb + self.pos_embedding
+
+        freq_embeddings = emb
+
+        z = freq_embeddings.mean(dim=(1, 2))        # (batch, d_emb)
 
         return z, freq_embeddings
+
+    def pooled_per_variable(self, x):
+        """
+        Returns a per-variable pooled embedding (batch, num_variables, d_emb),
+        pooling only over frequency bins (not variables). Used by the
+        backbone's fusion step, which needs to broadcast FD context into
+        each variable's TD patches without collapsing the variable axis.
+        """
+        _, freq_embeddings = self.forward(x)
+        return freq_embeddings.mean(dim=1)  # (batch, num_variables, d_emb)
 
 
 # ---------------------------------------------------------------------------
@@ -112,10 +121,6 @@ class FDEncoder(nn.Module):
 # ---------------------------------------------------------------------------
 
 def phase_perturbation(x, max_shift=0.1):
-    """
-    Perturb the phase of the FFT spectrum by a small random amount,
-    then convert back to time domain. x: (batch, seq_len, num_features).
-    """
     spectrum = torch.fft.rfft(x, dim=1)
     magnitude = spectrum.abs()
     phase = spectrum.angle()
@@ -129,10 +134,6 @@ def phase_perturbation(x, max_shift=0.1):
 
 
 def amplitude_modification(x, num_bands=5, boost_factor=1.5):
-    """
-    Randomly zero out some frequency bands and boost others,
-    then convert back to time domain. x: (batch, seq_len, num_features).
-    """
     spectrum = torch.fft.rfft(x, dim=1)
     magnitude = spectrum.abs()
     phase = spectrum.angle()
@@ -141,11 +142,9 @@ def amplitude_modification(x, num_bands=5, boost_factor=1.5):
     magnitude = magnitude.clone()
 
     for b in range(batch):
-        # zero out num_bands random bins
         zero_idx = torch.randperm(freq_bins)[:num_bands]
         magnitude[b, zero_idx] = 0.0
 
-        # boost num_bands random low-amplitude bins
         boost_idx = torch.randperm(freq_bins)[:num_bands]
         magnitude[b, boost_idx] = magnitude[b, boost_idx] * boost_factor
 
@@ -155,13 +154,11 @@ def amplitude_modification(x, num_bands=5, boost_factor=1.5):
 
 
 def apply_fd_augmentation(x):
-    """Randomly select one frequency-domain augmentation."""
     aug_fn = random.choice([phase_perturbation, amplitude_modification])
     return aug_fn(x)
 
 
 if __name__ == "__main__":
-    # quick smoke test
     batch_size = 4
     seq_len = 512
     num_features = 7
@@ -176,11 +173,10 @@ if __name__ == "__main__":
     z_aug, _ = encoder(x_aug)
 
     print(f"x:           {tuple(x.shape)}")
-    print(f"x_aug:       {tuple(x_aug.shape)}")
     print(f"z:           {tuple(z.shape)}")
-    print(f"freq_emb:    {tuple(freq_emb.shape)}")
+    print(f"freq_emb:    {tuple(freq_emb.shape)}  (batch, freq_bins, num_variables, d_emb)")
     print(f"z_aug:       {tuple(z_aug.shape)}")
 
-    from contrastive import nt_xent_loss  # only works if run from src/models with losses on path
+    from contrastive import nt_xent_loss
     loss = nt_xent_loss(z, z_aug)
     print(f"NT-Xent loss: {loss.item():.4f}")
