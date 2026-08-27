@@ -128,17 +128,8 @@ forecaster, tfb, results = train(
 
 ## Reference
 
-This repository implements the method described in the following paper:
-```bibtex
-@article{zhang2026tfllm,
-  title={TF-LLM: Enhanced time series analysis with time-frequency large language models},
-  author={Zhang, Yuhang and Yu, Zitong and Dai, Mingtong and Sun, Yue and Tan, Tao},
-  journal={Neural Networks},
-  volume={199},
-  pages={108687},
-  year={2026}
-}
-```
+This repository implements the method described in:
+Zhang et al., "TF-LLM: Enhanced time series analysis with time-frequency large language models," *Neural Networks*, vol. 199, 2026. [https://doi.org/10.1016/j.neunet.2026.108687](https://doi.org/10.1016/j.neunet.2026.108687)
 
 ## Acknowledgments
 
