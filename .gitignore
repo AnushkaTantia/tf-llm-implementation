@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# Environments
+venv*/
+.venv/
+env/
+
+# Data / model artifacts (large, regenerable — keep repo lightweight)
+checkpoints/*
+!checkpoints/.gitkeep
+*.pt
+*.pth
+data/*.csv
+!data/.gitkeep
+
+# Logs
+*.log
+*_log.txt
+
+# OS
+.DS_Store
+Thumbs.db
