@@ -5,5 +5,6 @@ This folder tracks external baseline models compared against our TF-LLM implemen
 | Baseline | Official repo | Test MSE | Test MAE |
 |---|---|---|---|
 | iTransformer | [thuml/iTransformer](https://github.com/thuml/iTransformer) | 0.3866 | 0.4046 |
+| Autoformer | [thuml/Autoformer](https://github.com/thuml/Autoformer) | 0.4300 | 0.4442 |
 
 See each subfolder's `notes.md` for the exact commands, fixes, and full logs.
