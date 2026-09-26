@@ -6,5 +6,6 @@ This folder tracks external baseline models compared against our TF-LLM implemen
 |---|---|---|---|
 | iTransformer | [thuml/iTransformer](https://github.com/thuml/iTransformer) | 0.3866 | 0.4046 |
 | Autoformer | [thuml/Autoformer](https://github.com/thuml/Autoformer) | 0.4300 | 0.4442 |
+| PatchTST | [yuqinie98/PatchTST](https://github.com/yuqinie98/PatchTST) | 0.3816 | 0.4051 |
 
 See each subfolder's `notes.md` for the exact commands, fixes, and full logs.
