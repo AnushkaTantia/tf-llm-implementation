@@ -36,6 +36,7 @@ from tfb_module import TFBModule, balance_loss, tfb_total_loss
 from tf_llm import TFLLMBackbone
 from forecast_head import TFLLMForecaster
 from hmm_scheduler import HMMScheduler
+from oahmm_scheduler import OAHMMScheduler
 from kalman_scheduler import KalmanScheduler
 def build_model(d_emb=64, patch_len=16, num_features=7, pred_len=96, num_prompt_tokens=10):
     """Instantiates all trainable components and wires them together."""
@@ -124,7 +125,7 @@ def combine_losses(task_loss, l_tfb, loss_mode="sum", alpha=0.3,
         progress = min(epoch / max(warmup_epochs, 1), 1.0)
         current_alpha = alpha * progress
         return task_loss + current_alpha * l_tfb, current_alpha
-    elif loss_mode == "hmm_varying":
+    elif loss_mode in ("hmm_varying", "oahmm_varying"):
         # alpha is supplied externally, once per epoch, by an HMMScheduler
         # instance (see hmm_scheduler.py) that infers -- via Viterbi
         # decoding on the observed epoch-to-epoch validation-MSE
@@ -273,6 +274,7 @@ def train(
                              # fixed_weighted/variable_weighted/time_varying/median/min/max/hmm_varying/kalman_varying
     alpha=0.3,               # weight on l_tfb for fixed_weighted / time_varying
     warmup_epochs=15,        # for time_varying: epochs to reach full alpha
+    alpha_over=0.5,       # OA-HMM weight in the overfitting state
     device=None,
     log_every=50,
     run_sanity_check=True,
@@ -295,15 +297,15 @@ def train(
     if loss_mode == "variable_weighted":
         loss_combiner = LearnableLossWeight().to(device)
     hmm_scheduler = None
-    if loss_mode == "hmm_varying":
-        hmm_scheduler = HMMScheduler()
+    if loss_mode in ("hmm_varying", "oahmm_varying"):
+        hmm_scheduler = OAHMMScheduler(alpha_over=alpha_over) if loss_mode == "oahmm_varying" else HMMScheduler()
     kalman_scheduler = None
     if loss_mode == "kalman_varying":
         kalman_scheduler = KalmanScheduler()
     trainable_params = get_trainable_parameters(forecaster, tfb, loss_combiner=loss_combiner)
     optimizer = torch.optim.Adam(trainable_params, lr=learning_rate, weight_decay=weight_decay)
     print(f"Device: {device}")
-    print(f"Loss mode: {loss_mode}" + (f" (alpha={alpha})" if loss_mode in ("fixed_weighted", "time_varying") else "") + (" (alpha set per-epoch by HMM scheduler)" if loss_mode == "hmm_varying" else "") + (" (alpha set per-epoch by Kalman scheduler)" if loss_mode == "kalman_varying" else ""))
+    print(f"Loss mode: {loss_mode}" + (f" (alpha={alpha})" if loss_mode in ("fixed_weighted", "time_varying") else "") + (" (alpha set per-epoch by HMM scheduler)" if loss_mode in ("hmm_varying", "oahmm_varying") else "") + (" (alpha set per-epoch by Kalman scheduler)" if loss_mode == "kalman_varying" else ""))
     print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
     print(f"Train batches/epoch: {len(train_loader)}  Val batches: {len(val_loader)}  Test batches: {len(test_loader)}")
     print("-" * 70)
@@ -313,7 +315,7 @@ def train(
     for epoch in range(1, epochs + 1):
         epoch_start = time.time()
         running_total, running_task = 0.0, 0.0
-        if loss_mode == "hmm_varying":
+        if loss_mode in ("hmm_varying", "oahmm_varying"):
             # alpha for this entire epoch is fixed by the HMM's current
             # state, inferred from validation-MSE volatility observed in
             # all prior epochs (epoch 1 uses the scheduler's initial
@@ -348,12 +350,12 @@ def train(
                     f"L_TFB={losses['l_tfb'].item():.4f}{alpha_str}"
                 )
         val_mse, val_mae = evaluate(forecaster, tfb, val_loader, device)
-        if loss_mode == "hmm_varying":
-            hmm_scheduler.observe(val_mse)
+        if loss_mode in ("hmm_varying", "oahmm_varying"):
+            hmm_scheduler.observe(val_mse, running_task / len(train_loader)) if loss_mode == "oahmm_varying" else hmm_scheduler.observe(val_mse)
         if loss_mode == "kalman_varying":
             kalman_scheduler.observe(val_mse)
         epoch_time = time.time() - epoch_start
-        hmm_str = f"  hmm_state={hmm_scheduler.get_state_name()}  alpha={alpha:.3f}" if loss_mode == "hmm_varying" else ""
+        hmm_str = f"  hmm_state={hmm_scheduler.get_state_name()}  alpha={alpha:.3f}" if loss_mode in ("hmm_varying", "oahmm_varying") else ""
         kalman_str = f"  |z|={kalman_scheduler.get_normalized_innovation():.3f}  alpha={alpha:.3f}" if loss_mode == "kalman_varying" else ""
         print(
             f"Epoch {epoch}/{epochs}  "
@@ -409,6 +411,7 @@ if __name__ == "__main__":
                                   "min", "max", "hmm_varying", "kalman_varying"])
     parser.add_argument("--alpha", type=float, default=0.3)
     parser.add_argument("--warmup_epochs", type=int, default=15)
+    parser.add_argument("--alpha_over", type=float, default=0.5)
     args = parser.parse_args()
     train(
         csv_path=args.csv_path,
@@ -421,4 +424,5 @@ if __name__ == "__main__":
         loss_mode=args.loss_mode,
         alpha=args.alpha,
         warmup_epochs=args.warmup_epochs,
+        alpha_over=args.alpha_over,
     )
