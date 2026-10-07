@@ -38,7 +38,7 @@ from forecast_head import TFLLMForecaster
 from hmm_scheduler import HMMScheduler
 from oahmm_scheduler import OAHMMScheduler
 from kalman_scheduler import KalmanScheduler
-def build_model(d_emb=64, patch_len=16, num_features=7, pred_len=96, num_prompt_tokens=10):
+def build_model(d_emb=64, patch_len=16, num_features=7, pred_len=96, num_prompt_tokens=10, use_revin=True):
     """Instantiates all trainable components and wires them together."""
     td_encoder = TDEncoder(patch_len=patch_len, num_features=num_features, d_emb=d_emb)
     fd_encoder = FDEncoder(seq_len=512, num_features=num_features, d_emb=d_emb)
@@ -51,6 +51,7 @@ def build_model(d_emb=64, patch_len=16, num_features=7, pred_len=96, num_prompt_
         pred_len=pred_len,
         patch_len=patch_len,
         num_features=num_features,
+        use_revin=use_revin,
     )
     return forecaster, tfb
 def get_trainable_parameters(forecaster, tfb, loss_combiner=None):
@@ -191,8 +192,9 @@ def compute_losses(forecaster, tfb, x_patched, x_raw, y, lam=0.5,
     z_T, z_F = aux["z_T"], aux["z_F"]
     task_loss = nn.functional.mse_loss(forecast, y)
     # augmented views, encoded independently for the contrastive objectives
-    x_patched_aug = apply_td_augmentation(x_patched)
-    x_raw_aug = apply_fd_augmentation(x_raw)
+    # augment the SAME inputs the encoders saw (RevIN-normalized when use_revin=True)
+    x_patched_aug = apply_td_augmentation(aux["x_patched_in"])
+    x_raw_aug = apply_fd_augmentation(aux["x_raw_in"])
     z_T_aug, _ = forecaster.td_encoder(x_patched_aug)
     z_F_aug, _ = forecaster.fd_encoder(x_raw_aug)
     l_t = nt_xent_loss(z_T, z_T_aug)
@@ -275,6 +277,7 @@ def train(
     alpha=0.3,               # weight on l_tfb for fixed_weighted / time_varying
     warmup_epochs=15,        # for time_varying: epochs to reach full alpha
     alpha_over=0.5,       # OA-HMM weight in the overfitting state
+    use_revin=True,       # input/output RevIN (paper Fig. 2); False = old behaviour
     device=None,
     log_every=50,
     run_sanity_check=True,
@@ -289,7 +292,8 @@ def train(
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=False)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, drop_last=False)
     forecaster, tfb = build_model(
-        d_emb=64, patch_len=patch_len, num_features=num_features, pred_len=pred_len
+        d_emb=64, patch_len=patch_len, num_features=num_features, pred_len=pred_len,
+        use_revin=use_revin,
     )
     forecaster.to(device)
     tfb.to(device)
@@ -305,6 +309,7 @@ def train(
     trainable_params = get_trainable_parameters(forecaster, tfb, loss_combiner=loss_combiner)
     optimizer = torch.optim.Adam(trainable_params, lr=learning_rate, weight_decay=weight_decay)
     print(f"Device: {device}")
+    print(f"Input/output RevIN: {use_revin}")
     print(f"Loss mode: {loss_mode}" + (f" (alpha={alpha})" if loss_mode in ("fixed_weighted", "time_varying") else "") + (" (alpha set per-epoch by HMM scheduler)" if loss_mode in ("hmm_varying", "oahmm_varying") else "") + (" (alpha set per-epoch by Kalman scheduler)" if loss_mode == "kalman_varying" else ""))
     print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
     print(f"Train batches/epoch: {len(train_loader)}  Val batches: {len(val_loader)}  Test batches: {len(test_loader)}")
