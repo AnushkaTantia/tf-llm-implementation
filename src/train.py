@@ -278,6 +278,8 @@ def train(
     warmup_epochs=15,        # for time_varying: epochs to reach full alpha
     alpha_over=0.5,       # OA-HMM weight in the overfitting state
     use_revin=True,       # input/output RevIN (paper Fig. 2); False = old behaviour
+    patience=None,         # early stopping: stop after this many epochs with no val improvement (None = off)
+    min_epochs=0,          # never stop before this epoch
     device=None,
     log_every=50,
     run_sanity_check=True,
@@ -317,6 +319,7 @@ def train(
     if run_sanity_check:
         sanity_check(forecaster, tfb, val_loader, device)
     best_val_mse = float("inf")
+    best_epoch = 0
     for epoch in range(1, epochs + 1):
         epoch_start = time.time()
         running_total, running_task = 0.0, 0.0
@@ -371,6 +374,7 @@ def train(
         )
         if val_mse < best_val_mse:
             best_val_mse = val_mse
+            best_epoch = epoch
             checkpoint_path = os.path.join(checkpoint_dir, "best_model.pt")
             torch.save(
                 {
@@ -385,6 +389,9 @@ def train(
             )
             print(f"  -> saved new best checkpoint (val_MSE={val_mse:.4f})")
         print("-" * 70)
+        if patience is not None and epoch >= min_epochs and epoch - best_epoch >= patience:
+            print(f"Early stopping at epoch {epoch} (best epoch {best_epoch}, patience {patience})")
+            break
     print(f"Training complete. Best val MSE: {best_val_mse:.4f}")
     test_mse, test_mae = None, None
     if run_test_eval:
@@ -399,7 +406,7 @@ def train(
         test_mse, test_mae = evaluate(forecaster, tfb, test_loader, device)
         print(f"TEST SET  ->  MSE: {test_mse:.4f}  MAE: {test_mae:.4f}")
         print(f"Paper's reported (Table 1, ETTh1, horizon 96)  ->  MSE: 0.339  MAE: 0.373")
-    return forecaster, tfb, {"best_val_mse": best_val_mse, "test_mse": test_mse, "test_mae": test_mae}
+    return forecaster, tfb, {"best_val_mse": best_val_mse, "test_mse": test_mse, "test_mae": test_mae, "best_epoch": best_epoch, "epochs_run": epoch}
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
