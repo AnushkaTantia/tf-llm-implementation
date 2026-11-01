@@ -1,0 +1,16 @@
+{
+ "arch": "E",
+ "seed": 42,
+ "best_epoch": 1,
+ "epochs_run": 6,
+ "best_val_mse": 0.7615613337944854,
+ "test_mse": 0.39353267804019343,
+ "test_rmse": 0.6273218297175649,
+ "test_mae": 0.41807532626462335,
+ "test_smape": 39.42959650560842,
+ "test_mape": 61.84475779995569,
+ "n_trainable": 3525629,
+ "minutes": 41.1,
+ "sec_per_epoch": 403.2,
+ "peak_gpu_gb": 8.67
+}

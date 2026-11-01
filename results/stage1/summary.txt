@@ -1,0 +1,32 @@
+Stage 1: E (flatten head + GPT-2) vs F (flatten head, no LLM); ETTh1, H=96, alpha=0
+
+E: n=3
+   test_mse       mean     0.3898  sd   0.0059  per seed [0.3929, 0.3935, 0.383]
+   test_rmse      mean     0.6243  sd   0.0047  per seed [0.6268, 0.6273, 0.6189]
+   test_mae       mean     0.4139  sd   0.0046  per seed [0.4148, 0.4181, 0.4089]
+   test_smape     mean    39.0532  sd   0.3989  per seed [38.6352, 39.4296, 39.0949]
+   best_val_mse   mean     0.7498  sd   0.0108  per seed [0.7403, 0.7616, 0.7475]
+   best_epoch     mean     1.6667  sd   1.1547  per seed [3.0, 1.0, 1.0]
+   sec_per_epoch  mean   415.3333  sd  20.2411  per seed [438.7, 403.2, 404.1]
+   minutes        mean    47.2333  sd  10.5368  per seed [59.4, 41.1, 41.2]
+   peak_gpu_gb    mean     8.6700  sd   0.0000  per seed [8.67, 8.67, 8.67]
+   n_trainable    mean 3525629.0000  sd   0.0000  per seed [3525629.0, 3525629.0, 3525629.0]
+F: n=3
+   test_mse       mean     0.3752  sd   0.0028  per seed [0.3782, 0.3726, 0.3748]
+   test_rmse      mean     0.6126  sd   0.0023  per seed [0.615, 0.6104, 0.6122]
+   test_mae       mean     0.3990  sd   0.0025  per seed [0.4018, 0.3972, 0.398]
+   test_smape     mean    37.9639  sd   0.1977  per seed [38.1528, 37.7584, 37.9805]
+   best_val_mse   mean     0.7244  sd   0.0041  per seed [0.7202, 0.7285, 0.7247]
+   best_epoch     mean     5.0000  sd   1.0000  per seed [6.0, 5.0, 4.0]
+   sec_per_epoch  mean    79.5333  sd   2.6274  per seed [76.5, 81.1, 81.0]
+   minutes        mean    13.3000  sd   0.9849  per seed [14.1, 13.6, 12.2]
+   peak_gpu_gb    mean     1.8400  sd   0.0000  per seed [1.84, 1.84, 1.84]
+   n_trainable    mean 2693117.0000  sd   0.0000  per seed [2693117.0, 2693117.0, 2693117.0]
+
+Paired differences E - F (same seed): negative = E better
+   seed 42: test MSE +0.0209   RMSE +0.0169   SMAPE +1.671
+   seed 123: test MSE +0.0146   RMSE +0.0118   SMAPE +0.482
+   seed 456: test MSE +0.0082   RMSE +0.0066   SMAPE +1.114
+
+Reference controls (same pipeline, computed earlier): window mean 0.709, seasonal naive (24 h) 0.512, DLinear 0.373 (test MSE)
+Three seeds describe variability; they are not a significance test.

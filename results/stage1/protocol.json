@@ -1,0 +1,34 @@
+{
+ "stage": "S1 E vs F",
+ "dataset": "ETTh1",
+ "seq_len": 512,
+ "pred_len": 96,
+ "batch_size": 32,
+ "learning_rate": 0.0001,
+ "weight_decay": 0.0001,
+ "epochs": 30,
+ "patience": 5,
+ "min_epochs": 5,
+ "loss_mode": "fixed_weighted",
+ "alpha": 0.0,
+ "use_revin": true,
+ "seeds": [
+  42,
+  123,
+  456
+ ],
+ "architectures": {
+  "E": {
+   "head_type": "flatten",
+   "use_llm": true,
+   "llm_policy": "norms_pos"
+  },
+  "F": {
+   "head_type": "flatten",
+   "use_llm": false,
+   "llm_policy": "none"
+  }
+ },
+ "csv": "/kaggle/input/datasets/fluentn/etdataset-main/ETDataset-main/ETT-small/ETTh1.csv",
+ "git_commit": "c3f9cfcd1f646d40e95cb43584ebf7a7e05f54a5"
+}
