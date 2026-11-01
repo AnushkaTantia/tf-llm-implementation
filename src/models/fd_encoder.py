@@ -90,14 +90,18 @@ class FDEncoder(nn.Module):
         mag = magnitude.permute(0, 2, 1)           # (batch, num_variables, freq_bins)
         mag = mag.reshape(batch * num_variables, self.freq_bins, 1)
 
+        assert seq_len == self.seq_len, f"seq_len {seq_len} != {self.seq_len}"
         emb = self.freq_proj(mag)                  # (batch*num_variables, freq_bins, d_emb)
+        # Frequency-bin positional embedding, shared by all variables, added ONCE and BEFORE
+        # self-attention so the transformer can tell which frequency each token is.
+        # (Stage 1 fix: same defect as the TD encoder -- it was added after the transformer.)
+        emb = emb + self.pos_embedding[0, :, 0, :].unsqueeze(0)   # (1, freq_bins, d_emb)
         emb = self.dropout(emb)
 
         emb = self.transformer(emb)                # (batch*num_variables, freq_bins, d_emb)
 
         emb = emb.reshape(batch, num_variables, self.freq_bins, self.d_emb)
         emb = emb.permute(0, 2, 1, 3)               # (batch, freq_bins, num_variables, d_emb)
-        emb = emb + self.pos_embedding
 
         freq_embeddings = emb
 

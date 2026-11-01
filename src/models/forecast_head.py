@@ -83,29 +83,55 @@ class MaskBlock(nn.Module):
         return forecast
 
 
+HEAD_TYPES = ("mask", "flatten")
+
+
 class TFLLMForecaster(nn.Module):
     def __init__(self, td_encoder, fd_encoder, backbone, pred_len=96, patch_len=16, num_features=7,
-                 use_revin=True):
+                 use_revin=True, *, head_type, seq_len=512, head_dropout=0.1):
+        """
+        head_type (required, no default -- every run must state it):
+          "mask"    : original head of Zhang et al. -- learnable mask tokens appended after the
+                      sequence tokens, decoded by the MaskBlock. Requires the LLM.
+          "flatten" : linear head over the hidden states of the sequence tokens, flattened per
+                      variable (as in GPT4TS, Zhou et al., 2023). Selected as the candidate head by
+                      the Oct 31 ablation; works with and without the LLM.
+        Parameters of the head that is NOT selected are frozen (excluded from the optimizer).
+        """
         super().__init__()
+        assert head_type in HEAD_TYPES, f"head_type must be one of {HEAD_TYPES}"
+        if head_type == "mask":
+            assert backbone.use_llm, "the mask head needs the LLM (use_llm=True)"
+        assert seq_len % patch_len == 0 and pred_len % patch_len == 0
         self.td_encoder = td_encoder
         self.fd_encoder = fd_encoder
         self.backbone = backbone
 
+        self.head_type = head_type
         self.pred_len = pred_len
         self.patch_len = patch_len
         self.num_features = num_features
-
-        assert pred_len % patch_len == 0
+        self.seq_len = seq_len
+        self.num_patches = seq_len // patch_len
         self.num_mask_patches = pred_len // patch_len
 
         # T_Mask: a single learnable mask token, duplicated across patches and variables
         self.mask_token = nn.Parameter(torch.randn(backbone.hidden_size) * 0.02)
-
         self.mask_block = MaskBlock(hidden_size=backbone.hidden_size, patch_len=patch_len)
+
+        if head_type == "flatten":
+            self.head_drop = nn.Dropout(head_dropout)
+            self.flat_head = nn.Linear(self.num_patches * backbone.hidden_size, pred_len)
+            # the mask head is not used: keep it out of training
+            self.mask_token.requires_grad = False
+            for p in self.mask_block.parameters():
+                p.requires_grad = False
 
         self.use_revin = use_revin
         if use_revin:
             self.revin = InstanceRevIN(num_features)
+
+        self.shape_log = {}   # last forward's intermediate shapes (used by the Stage 1 tests)
 
     def forward(self, x_patched, x_raw):
         """
@@ -129,24 +155,52 @@ class TFLLMForecaster(nn.Module):
         z_F, _ = self.fd_encoder(x_raw)
         fd_pooled_per_var = self.fd_encoder.pooled_per_variable(x_raw)
 
+        assert num_variables == self.num_features, f"{num_variables} variables != {self.num_features}"
+        num_patches = x_patched.shape[1]
+        assert num_patches == self.num_patches, f"{num_patches} patches != {self.num_patches}"
+
+        # T_Seq: one token per (patch, variable), patch-major order: token index = p*V + v.
+        # Only TD patch tokens (fused with each variable's pooled FD embedding) -- there are
+        # no separate frequency tokens and no special tokens in seq_tokens.
         seq_tokens = self.backbone.build_sequence_tokens(td_patch_embeddings, fd_pooled_per_var)
-        prompt_tokens = self.backbone.get_prompt_tokens(batch_size)
+        H = self.backbone.hidden_size
+        assert seq_tokens.shape == (batch_size, num_patches * num_variables, H), seq_tokens.shape
 
-        num_mask_tokens = self.num_mask_patches * num_variables
-        mask_tokens = self.mask_token.unsqueeze(0).unsqueeze(0).expand(
-            batch_size, num_mask_tokens, -1
-        )
+        if self.head_type == "flatten":
+            if self.backbone.use_llm:
+                prompt_tokens = self.backbone.get_prompt_tokens(batch_size)
+                n_prompt = prompt_tokens.shape[1]
+                hidden = self.backbone.forward_backbone(torch.cat([prompt_tokens, seq_tokens], dim=1))
+                assert hidden.shape == (batch_size, n_prompt + num_patches * num_variables, H)
+                hidden = hidden[:, n_prompt:, :]          # drop prompt positions: sequence tokens only
+            else:
+                hidden = seq_tokens
+            hidden = hidden.reshape(batch_size, num_patches, num_variables, H)   # (B, P, V, H)
+            self.shape_log["before_flatten"] = tuple(hidden.shape)
+            hidden = hidden.permute(0, 2, 1, 3)                                   # (B, V, P, H)
+            self.shape_log["per_variable"] = tuple(hidden.shape)
+            hidden = hidden.reshape(batch_size, num_variables, num_patches * H)   # (B, V, P*H)
+            self.shape_log["flattened"] = tuple(hidden.shape)
+            out = self.flat_head(self.head_drop(hidden))                          # (B, V, pred_len)
+            self.shape_log["linear_output"] = tuple(out.shape)
+            assert out.shape == (batch_size, num_variables, self.pred_len)
+            forecast = out.permute(0, 2, 1)                                       # (B, pred_len, V)
+        else:
+            prompt_tokens = self.backbone.get_prompt_tokens(batch_size)
+            num_mask_tokens = self.num_mask_patches * num_variables
+            mask_tokens = self.mask_token.unsqueeze(0).unsqueeze(0).expand(
+                batch_size, num_mask_tokens, -1
+            )
+            full_input = torch.cat([prompt_tokens, seq_tokens, mask_tokens], dim=1)
+            hidden_states = self.backbone.forward_backbone(full_input)
+            mask_hidden_states = hidden_states[:, -num_mask_tokens:, :]
+            mask_hidden_states = mask_hidden_states.reshape(
+                batch_size, self.num_mask_patches, num_variables, H
+            )
+            forecast = self.mask_block(mask_hidden_states)
 
-        full_input = torch.cat([prompt_tokens, seq_tokens, mask_tokens], dim=1)
-
-        hidden_states = self.backbone.forward_backbone(full_input)
-
-        mask_hidden_states = hidden_states[:, -num_mask_tokens:, :]
-        mask_hidden_states = mask_hidden_states.reshape(
-            batch_size, self.num_mask_patches, num_variables, self.backbone.hidden_size
-        )
-
-        forecast = self.mask_block(mask_hidden_states)
+        assert forecast.shape == (batch_size, self.pred_len, num_variables), forecast.shape
+        self.shape_log["final_forecast"] = tuple(forecast.shape)
 
         if self.use_revin:
             forecast = self.revin.denorm(forecast, mean, std)

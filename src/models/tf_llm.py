@@ -11,20 +11,50 @@ features undergo embedding, normalization, and patching."
 Eq. 7: Z_pred = concat(T_Pro, T_Seq, dup(T_Mask, l_f))
 """
 
+import re
+
 import torch
 import torch.nn as nn
 from transformers import GPT2Model
 
 
+# GPT-2 parameters that the "norms_pos" policy trains (GPT4TS, Zhou et al., 2023):
+# every block's two layer norms, the final layer norm, and the position embeddings.
+# Attention, MLP and token-embedding weights always stay frozen.
+LLM_NORMS_POS_PATTERN = re.compile(r"^(h\.\d+\.ln_[12]\.(weight|bias)|ln_f\.(weight|bias)|wpe\.weight)$")
+LLM_POLICIES = ("frozen", "norms_pos")
+
+
 class TFLLMBackbone(nn.Module):
-    def __init__(self, d_emb=64, num_prompt_tokens=10, gpt2_name="gpt2", dropout=0.1):
+    def __init__(self, d_emb=64, num_prompt_tokens=10, gpt2_name="gpt2", dropout=0.1, *,
+                 use_llm, llm_policy, llm_hidden_size=768):
+        """
+        use_llm=True : load pretrained GPT-2 and apply `llm_policy`:
+                       "frozen"    -> no GPT-2 parameter is trained
+                       "norms_pos" -> only layer norms + position embeddings are trained
+        use_llm=False: GPT-2 is not created at all (no-LLM ablation). Sequence tokens are
+                       still projected to `llm_hidden_size` so that the forecasting head has
+                       the same input size with and without the LLM.
+        """
         super().__init__()
-
-        self.gpt2 = GPT2Model.from_pretrained(gpt2_name)
-        self.hidden_size = self.gpt2.config.hidden_size
-
-        for param in self.gpt2.parameters():
-            param.requires_grad = False
+        self.use_llm = bool(use_llm)
+        if self.use_llm:
+            assert llm_policy in LLM_POLICIES, f"llm_policy must be one of {LLM_POLICIES}"
+            self.gpt2 = GPT2Model.from_pretrained(gpt2_name)
+            self.hidden_size = self.gpt2.config.hidden_size
+            # 1) freeze ALL GPT-2 parameters explicitly ...
+            for param in self.gpt2.parameters():
+                param.requires_grad = False
+            # 2) ... then unfreeze only what the policy allows
+            if llm_policy == "norms_pos":
+                for name, param in self.gpt2.named_parameters():
+                    if LLM_NORMS_POS_PATTERN.match(name):
+                        param.requires_grad = True
+        else:
+            assert llm_policy in (None, "none"), "llm_policy must be None/'none' when use_llm=False"
+            self.gpt2 = None
+            self.hidden_size = llm_hidden_size
+        self.llm_policy = llm_policy if self.use_llm else "none"
 
         # fusion weight combining TD patch embeddings with per-variable pooled FD embeddings
         self.fusion_alpha = nn.Parameter(torch.tensor(0.5))
@@ -38,9 +68,10 @@ class TFLLMBackbone(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # T_Pro: learnable prompt tokens (Section 3.3)
+        # T_Pro: learnable prompt tokens (Section 3.3). Only used with the LLM.
         self.prompt_tokens = nn.Parameter(
-            torch.randn(num_prompt_tokens, self.hidden_size) * 0.02
+            torch.randn(num_prompt_tokens, self.hidden_size) * 0.02,
+            requires_grad=self.use_llm,
         )
         self.num_prompt_tokens = num_prompt_tokens
 
@@ -77,6 +108,7 @@ class TFLLMBackbone(nn.Module):
         return self.prompt_tokens.unsqueeze(0).expand(batch_size, -1, -1)
 
     def forward_backbone(self, input_embeds, attention_mask=None):
+        assert self.use_llm, "forward_backbone called with use_llm=False"
         outputs = self.gpt2(inputs_embeds=input_embeds, attention_mask=attention_mask)
         return outputs.last_hidden_state
 

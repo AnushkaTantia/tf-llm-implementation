@@ -22,6 +22,9 @@ import os
 import sys
 import time
 import math
+import json
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -38,11 +41,19 @@ from forecast_head import TFLLMForecaster
 from hmm_scheduler import HMMScheduler
 from oahmm_scheduler import OAHMMScheduler
 from kalman_scheduler import KalmanScheduler
-def build_model(d_emb=64, patch_len=16, num_features=7, pred_len=96, num_prompt_tokens=10, use_revin=True):
-    """Instantiates all trainable components and wires them together."""
+def build_model(d_emb=64, patch_len=16, num_features=7, pred_len=96, num_prompt_tokens=10, use_revin=True,
+                seq_len=512, *, head_type, use_llm, llm_policy):
+    """
+    Instantiates all trainable components and wires them together.
+    The architecture options have NO defaults, so every caller states them explicitly:
+      head_type : "mask" (original head) | "flatten"
+      use_llm   : True (GPT-2) | False (no-LLM ablation; GPT-2 is not created)
+      llm_policy: "frozen" | "norms_pos" when use_llm=True; "none" when use_llm=False
+    """
     td_encoder = TDEncoder(patch_len=patch_len, num_features=num_features, d_emb=d_emb)
-    fd_encoder = FDEncoder(seq_len=512, num_features=num_features, d_emb=d_emb)
-    backbone = TFLLMBackbone(d_emb=d_emb, num_prompt_tokens=num_prompt_tokens)
+    fd_encoder = FDEncoder(seq_len=seq_len, num_features=num_features, d_emb=d_emb)
+    backbone = TFLLMBackbone(d_emb=d_emb, num_prompt_tokens=num_prompt_tokens,
+                             use_llm=use_llm, llm_policy=llm_policy)
     tfb = TFBModule(d_emb=d_emb, proj_dim=128)
     forecaster = TFLLMForecaster(
         td_encoder=td_encoder,
@@ -52,8 +63,30 @@ def build_model(d_emb=64, patch_len=16, num_features=7, pred_len=96, num_prompt_
         patch_len=patch_len,
         num_features=num_features,
         use_revin=use_revin,
+        head_type=head_type,
+        seq_len=seq_len,
     )
     return forecaster, tfb
+
+
+def trainable_parameter_report(forecaster, tfb, loss_combiner=None):
+    """Names and sizes of every parameter, split into trainable and frozen, for the run log."""
+    mods = [("forecaster", forecaster), ("tfb", tfb)]
+    if loss_combiner is not None:
+        mods.append(("loss_combiner", loss_combiner))
+    trainable, frozen = [], []
+    for prefix, m in mods:
+        for n, p in m.named_parameters():
+            (trainable if p.requires_grad else frozen).append((f"{prefix}.{n}", p.numel()))
+    return {"trainable": trainable, "frozen": frozen,
+            "n_trainable": sum(k for _, k in trainable), "n_frozen": sum(k for _, k in frozen)}
+
+
+def set_seed(seed):
+    random.seed(seed); np.random.seed(seed)
+    torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
+
+
 def get_trainable_parameters(forecaster, tfb, loss_combiner=None):
     """
     Collects all trainable parameters across the forecaster (TD/FD
@@ -278,6 +311,11 @@ def train(
     warmup_epochs=15,        # for time_varying: epochs to reach full alpha
     alpha_over=0.5,       # OA-HMM weight in the overfitting state
     use_revin=True,       # input/output RevIN (paper Fig. 2); False = old behaviour
+    *,
+    head_type,            # REQUIRED: "mask" | "flatten"
+    use_llm,              # REQUIRED: True | False
+    llm_policy,           # REQUIRED: "frozen" | "norms_pos" (use_llm=True) or "none"
+    seed,                 # REQUIRED: random seed (python, numpy, torch)
     patience=None,         # early stopping: stop after this many epochs with no val improvement (None = off)
     min_epochs=0,          # never stop before this epoch
     device=None,
@@ -287,6 +325,17 @@ def train(
 ):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(checkpoint_dir, exist_ok=True)
+    set_seed(seed)
+    run_config = dict(
+        csv_path=csv_path, seq_len=seq_len, pred_len=pred_len, patch_len=patch_len,
+        num_features=num_features, batch_size=batch_size, learning_rate=learning_rate,
+        weight_decay=weight_decay, epochs=epochs, lam=lam, loss_mode=loss_mode, alpha=alpha,
+        warmup_epochs=warmup_epochs, alpha_over=alpha_over, use_revin=use_revin,
+        head_type=head_type, use_llm=use_llm, llm_policy=llm_policy, seed=seed,
+        patience=patience, min_epochs=min_epochs, checkpoint_rule="lowest validation MSE",
+        split="ETTh1 12/4/4 months, train-only z-score", device=str(device),
+        torch_version=str(torch.__version__),
+    )
     train_ds = ETTh1Dataset(csv_path, flag="train", seq_len=seq_len, pred_len=pred_len, patch_len=patch_len)
     val_ds = ETTh1Dataset(csv_path, flag="val", seq_len=seq_len, pred_len=pred_len, patch_len=patch_len)
     test_ds = ETTh1Dataset(csv_path, flag="test", seq_len=seq_len, pred_len=pred_len, patch_len=patch_len)
@@ -295,7 +344,8 @@ def train(
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, drop_last=False)
     forecaster, tfb = build_model(
         d_emb=64, patch_len=patch_len, num_features=num_features, pred_len=pred_len,
-        use_revin=use_revin,
+        use_revin=use_revin, seq_len=seq_len,
+        head_type=head_type, use_llm=use_llm, llm_policy=llm_policy,
     )
     forecaster.to(device)
     tfb.to(device)
@@ -310,8 +360,23 @@ def train(
         kalman_scheduler = KalmanScheduler()
     trainable_params = get_trainable_parameters(forecaster, tfb, loss_combiner=loss_combiner)
     optimizer = torch.optim.Adam(trainable_params, lr=learning_rate, weight_decay=weight_decay)
+    report = trainable_parameter_report(forecaster, tfb, loss_combiner)
+    assert report["n_trainable"] == sum(p.numel() for p in trainable_params)
+    run_config["parameters"] = report
+    try:
+        import transformers
+        run_config["transformers_version"] = str(transformers.__version__)
+    except Exception:
+        pass
+    with open(os.path.join(checkpoint_dir, "run_config.json"), "w") as fh:
+        json.dump(run_config, fh, indent=1)
     print(f"Device: {device}")
-    print(f"Input/output RevIN: {use_revin}")
+    print(f"Architecture: head={head_type}  LLM={use_llm}  LLM policy={llm_policy}  RevIN={use_revin}  seed={seed}")
+    print(f"Trainable parameter tensors ({len(report['trainable'])}):")
+    for n, k in report["trainable"]:
+        print(f"    {n:70s} {k:>10,}")
+    print(f"Frozen parameters: {report['n_frozen']:,} in {len(report['frozen'])} tensors "
+          f"(full list in run_config.json)")
     print(f"Loss mode: {loss_mode}" + (f" (alpha={alpha})" if loss_mode in ("fixed_weighted", "time_varying") else "") + (" (alpha set per-epoch by HMM scheduler)" if loss_mode in ("hmm_varying", "oahmm_varying") else "") + (" (alpha set per-epoch by Kalman scheduler)" if loss_mode == "kalman_varying" else ""))
     print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
     print(f"Train batches/epoch: {len(train_loader)}  Val batches: {len(val_loader)}  Test batches: {len(test_loader)}")
@@ -320,15 +385,18 @@ def train(
         sanity_check(forecaster, tfb, val_loader, device)
     best_val_mse = float("inf")
     best_epoch = 0
+    history = []
     for epoch in range(1, epochs + 1):
         epoch_start = time.time()
-        running_total, running_task = 0.0, 0.0
+        running_total, running_task, running_tfb = 0.0, 0.0, 0.0
+        state_for_epoch = None
         if loss_mode in ("hmm_varying", "oahmm_varying"):
             # alpha for this entire epoch is fixed by the HMM's current
             # state, inferred from validation-MSE volatility observed in
             # all prior epochs (epoch 1 uses the scheduler's initial
             # "unstable" state, since no observations exist yet).
             alpha = hmm_scheduler.get_alpha()
+            state_for_epoch = hmm_scheduler.get_state_name()
         if loss_mode == "kalman_varying":
             # alpha for this entire epoch is set by the Kalman scheduler's
             # current continuous output, based on all prior epochs'
@@ -349,6 +417,8 @@ def train(
             optimizer.step()
             running_total += losses["total_loss"].item()
             running_task += losses["task_loss"].item()
+            running_tfb += losses["l_tfb"].item()
+            alpha_used = losses["effective_alpha"]
             if (step + 1) % log_every == 0:
                 alpha_str = f"  alpha={losses['effective_alpha']:.3f}" if losses["effective_alpha"] is not None else ""
                 print(
@@ -358,19 +428,41 @@ def train(
                     f"L_TFB={losses['l_tfb'].item():.4f}{alpha_str}"
                 )
         val_mse, val_mae = evaluate(forecaster, tfb, val_loader, device)
+        train_task_mean = running_task / len(train_loader)
+        # The scheduler observes this epoch's validation (and, for OA-HMM, training task) loss
+        # AFTER the epoch; the alpha it returns is used for the NEXT epoch.
         if loss_mode in ("hmm_varying", "oahmm_varying"):
-            hmm_scheduler.observe(val_mse, running_task / len(train_loader)) if loss_mode == "oahmm_varying" else hmm_scheduler.observe(val_mse)
+            hmm_scheduler.observe(val_mse, train_task_mean) if loss_mode == "oahmm_varying" else hmm_scheduler.observe(val_mse)
         if loss_mode == "kalman_varying":
             kalman_scheduler.observe(val_mse)
         epoch_time = time.time() - epoch_start
-        hmm_str = f"  hmm_state={hmm_scheduler.get_state_name()}  alpha={alpha:.3f}" if loss_mode in ("hmm_varying", "oahmm_varying") else ""
-        kalman_str = f"  |z|={kalman_scheduler.get_normalized_innovation():.3f}  alpha={alpha:.3f}" if loss_mode == "kalman_varying" else ""
+        sched = hmm_scheduler or kalman_scheduler
+        rec = dict(epoch=epoch, alpha_used=alpha_used, state_used=state_for_epoch,
+                   train_total=running_total / len(train_loader), train_task=train_task_mean,
+                   train_tfb=running_tfb / len(train_loader), val_mse=val_mse, val_mae=val_mae,
+                   gap=val_mse - train_task_mean, seconds=round(epoch_time, 1))
+        if hmm_scheduler is not None:
+            rec.update(state_after_observation=hmm_scheduler.get_state_name(),
+                       alpha_next=hmm_scheduler.get_alpha())
+        if kalman_scheduler is not None:
+            rec.update(innovation_z=kalman_scheduler.get_normalized_innovation(),
+                       alpha_next=kalman_scheduler.get_alpha())
+        if sched is not None:
+            rec["skipped_observations"] = getattr(sched, "skipped_observations", 0)
+        history.append(rec)
+        with open(os.path.join(checkpoint_dir, "epoch_log.json"), "w") as fh:
+            json.dump(history, fh, indent=1)
+        a_str = f"  alpha_used={alpha_used:.3f}" if alpha_used is not None else ""
+        hmm_str = (f"  state_used={state_for_epoch}  state_after={rec['state_after_observation']}"
+                   f"  alpha_next={rec['alpha_next']:.3f}") if hmm_scheduler is not None else ""
+        kalman_str = (f"  |z|={rec['innovation_z']:.3f}  alpha_next={rec['alpha_next']:.3f}"
+                      if kalman_scheduler is not None else "")
         print(
             f"Epoch {epoch}/{epochs}  "
             f"train_total={running_total/len(train_loader):.4f}  "
-            f"train_task={running_task/len(train_loader):.4f}  "
+            f"train_task={train_task_mean:.4f}  train_TFB={rec['train_tfb']:.4f}  "
             f"val_MSE={val_mse:.4f}  val_MAE={val_mae:.4f}  "
-            f"({epoch_time:.1f}s){hmm_str}{kalman_str}"
+            f"({epoch_time:.1f}s){a_str}{hmm_str}{kalman_str}"
         )
         if val_mse < best_val_mse:
             best_val_mse = val_mse
@@ -384,6 +476,7 @@ def train(
                     "val_mse": val_mse,
                     "val_mae": val_mae,
                     "loss_mode": loss_mode,
+                    "config": {k: v for k, v in run_config.items() if k != "parameters"},
                 },
                 checkpoint_path,
             )
@@ -406,35 +499,39 @@ def train(
         test_mse, test_mae = evaluate(forecaster, tfb, test_loader, device)
         print(f"TEST SET  ->  MSE: {test_mse:.4f}  MAE: {test_mae:.4f}")
         print(f"Paper's reported (Table 1, ETTh1, horizon 96)  ->  MSE: 0.339  MAE: 0.373")
-    return forecaster, tfb, {"best_val_mse": best_val_mse, "test_mse": test_mse, "test_mae": test_mae, "best_epoch": best_epoch, "epochs_run": epoch}
+    result = {"best_val_mse": best_val_mse, "test_mse": test_mse, "test_mae": test_mae,
+              "best_epoch": best_epoch, "epochs_run": epoch,
+              "n_trainable": report["n_trainable"], "history": history}
+    return forecaster, tfb, result
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv_path", type=str, required=True)
     parser.add_argument("--checkpoint_dir", type=str, required=True)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    # architecture: required, no defaults
+    parser.add_argument("--head_type", type=str, required=True, choices=["mask", "flatten"])
+    parser.add_argument("--llm", type=str, required=True, choices=["gpt2", "none"])
+    parser.add_argument("--llm_policy", type=str, required=True, choices=["frozen", "norms_pos", "none"])
+    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--loss_mode", type=str, required=True,
+                        choices=["sum", "average", "fixed_weighted", "variable_weighted", "time_varying",
+                                 "median", "min", "max", "hmm_varying", "kalman_varying", "oahmm_varying"])
+    parser.add_argument("--epochs", type=int, required=True)
+    parser.add_argument("--batch_size", type=int, required=True)
+    parser.add_argument("--learning_rate", type=float, required=True)
+    parser.add_argument("--pred_len", type=int, required=True)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--pred_len", type=int, default=96)
-    parser.add_argument("--loss_mode", type=str, default="sum",
-                         choices=["sum", "average", "fixed_weighted",
-                                  "variable_weighted", "time_varying", "median",
-                                  "min", "max", "hmm_varying", "kalman_varying"])
     parser.add_argument("--alpha", type=float, default=0.3)
     parser.add_argument("--warmup_epochs", type=int, default=15)
     parser.add_argument("--alpha_over", type=float, default=0.5)
+    parser.add_argument("--patience", type=int, default=None)
+    parser.add_argument("--min_epochs", type=int, default=0)
     args = parser.parse_args()
     train(
-        csv_path=args.csv_path,
-        checkpoint_dir=args.checkpoint_dir,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        pred_len=args.pred_len,
-        loss_mode=args.loss_mode,
-        alpha=args.alpha,
-        warmup_epochs=args.warmup_epochs,
-        alpha_over=args.alpha_over,
+        csv_path=args.csv_path, checkpoint_dir=args.checkpoint_dir, epochs=args.epochs,
+        batch_size=args.batch_size, learning_rate=args.learning_rate, weight_decay=args.weight_decay,
+        pred_len=args.pred_len, loss_mode=args.loss_mode, alpha=args.alpha,
+        warmup_epochs=args.warmup_epochs, alpha_over=args.alpha_over,
+        head_type=args.head_type, use_llm=(args.llm == "gpt2"), llm_policy=args.llm_policy,
+        seed=args.seed, patience=args.patience, min_epochs=args.min_epochs,
     )

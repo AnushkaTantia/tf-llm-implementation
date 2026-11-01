@@ -120,6 +120,7 @@ class HMMScheduler:
         initial=None,
         alpha_by_state=None,
     ):
+        self.skipped_observations = 0   # non-finite observations rejected by observe()
         self.emission_std = emission_std or EMISSION_STD
         self.transition = transition or TRANSITION
         self.initial = initial or INITIAL
@@ -134,6 +135,12 @@ class HMMScheduler:
         Record a new epoch's validation MSE. Call once per epoch, after
         that epoch's validation evaluation completes.
         """
+        # Guard: a non-finite loss (NaN/inf, e.g. a diverged epoch) is not used as evidence.
+        # The observation is rejected BEFORE any history or state is touched, so the
+        # scheduler keeps its previous state and alpha; the rejection is counted.
+        if not all(math.isfinite(float(v)) for v in (val_mse,)):
+            self.skipped_observations += 1
+            return
         self.val_mse_history.append(val_mse)
         if len(self.val_mse_history) >= 2:
             delta = self.val_mse_history[-1] - self.val_mse_history[-2]

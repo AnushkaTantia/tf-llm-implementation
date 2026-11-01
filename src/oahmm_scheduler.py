@@ -60,6 +60,7 @@ def _slope(ys):
 
 class OAHMMScheduler:
     def __init__(self, alpha_low=0.05, alpha_high=0.30, alpha_over=0.5, window=WINDOW):
+        self.skipped_observations = 0   # non-finite observations rejected by observe()
         self.alpha_by_state = {0: alpha_low, 1: alpha_high, 2: alpha_over}
         self.window = window
         self.val, self.gap = [], []
@@ -68,6 +69,12 @@ class OAHMMScheduler:
         self.obs_history = []           # (delta, s) per epoch from epoch 2
 
     def observe(self, val_mse, train_task):
+        # Guard: a non-finite loss (NaN/inf, e.g. a diverged epoch) is not used as evidence.
+        # The observation is rejected BEFORE any history or state is touched, so the
+        # scheduler keeps its previous state and alpha; the rejection is counted.
+        if not all(math.isfinite(float(v)) for v in (val_mse, train_task)):
+            self.skipped_observations += 1
+            return
         self.val.append(float(val_mse))
         self.gap.append(float(val_mse) - float(train_task))
         if len(self.val) < 2:

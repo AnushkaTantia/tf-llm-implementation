@@ -5,7 +5,8 @@ Each variable (channel) is processed independently through SHARED weights
 (same pattern as PatchTST, cited by the paper as its patch-size reference).
 Variables are never mixed together in the patch projection. Per Section 3.3:
 "We ensure these tokens retain the variable dimension d_v from the input
-sequence." Learnable positional embeddings added per Section 3.3.
+sequence." Learnable positional embeddings added per Section 3.3, before the
+transformer (Stage 1 fix, Nov 2026).
 
 Two outputs:
   - patch_embeddings: (batch, num_patches, num_variables, d_emb) — T_Seq
@@ -55,13 +56,21 @@ class TDEncoder(nn.Module):
         x = x_patched.permute(0, 3, 1, 2)  # (batch, num_variables, num_patches, patch_len)
         x = x.reshape(batch * num_variables, num_patches, patch_len)
 
-        emb = self.patch_proj(x)
+        assert num_patches <= self.max_patches, f"{num_patches} patches > max_patches {self.max_patches}"
+        assert patch_len == self.patch_len, f"patch_len {patch_len} != {self.patch_len}"
+
+        emb = self.patch_proj(x)                   # (batch*num_variables, num_patches, d_emb)
+        # Positional embedding: one learnable vector per patch position, shared by all
+        # variables, added ONCE and BEFORE self-attention so the transformer can use patch
+        # order. (Stage 1 fix: it was previously added after the transformer, which left
+        # the encoder's attention order-blind.) pos_embedding: (1, max_patches, 1, d_emb).
+        pos = self.pos_embedding[0, :num_patches, 0, :]          # (num_patches, d_emb)
+        emb = emb + pos.unsqueeze(0)               # broadcast over batch*num_variables
         emb = self.dropout(emb)
         emb = self.transformer(emb)
 
         emb = emb.reshape(batch, num_variables, num_patches, self.d_emb)
         emb = emb.permute(0, 2, 1, 3)  # (batch, num_patches, num_variables, d_emb)
-        emb = emb + self.pos_embedding[:, :num_patches, :, :]
 
         patch_embeddings = emb
         z = patch_embeddings.mean(dim=(1, 2))  # pooled for contrastive loss

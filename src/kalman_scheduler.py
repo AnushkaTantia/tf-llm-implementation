@@ -109,6 +109,7 @@ class KalmanScheduler:
 
     def __init__(self, R=R_MEASUREMENT_NOISE, Q=Q_PROCESS_NOISE,
                  alpha_min=ALPHA_MIN, alpha_max=ALPHA_MAX, tau=TAU):
+        self.skipped_observations = 0   # non-finite observations rejected by observe()
         self.R = R
         self.Q = Q
         self.alpha_min = alpha_min
@@ -129,6 +130,12 @@ class KalmanScheduler:
         step, and compute the resulting alpha. Call once per epoch, after
         that epoch's validation evaluation completes.
         """
+        # Guard: a non-finite loss (NaN/inf, e.g. a diverged epoch) is not used as evidence.
+        # The observation is rejected BEFORE any history or state is touched, so the
+        # scheduler keeps its previous state and alpha; the rejection is counted.
+        if not all(math.isfinite(float(v)) for v in (val_mse,)):
+            self.skipped_observations += 1
+            return
         self.val_mse_history.append(val_mse)
 
         if self.x_hat is None:
