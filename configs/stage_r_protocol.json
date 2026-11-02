@@ -1,0 +1,61 @@
+{
+ "stage": "R1: reassessment after S3 -- why does the TFB objective fail, is the failure general, and is a revised objective justified?",
+ "declared_on": "2026-11-02, after the supervisor's decision on the S3 result and before any R1 run",
+ "supervisor_decision": "Nov 2, 2026: keep Stage 2 as the credible baseline; keep the S3 negative result as a main finding; do not start S4; follow Option R first (ETTh2, horizon 336, GPT-2 model E, timing-loss explanation); then reassess whether to redesign TFB to preserve temporal information; scheduler experiments only if a revised or validated objective gives a defensible reason.",
+ "forecaster": "configs/frozen_forecaster.json, unchanged: F_flatten_noLLM_v1 (E_flatten_gpt2_normspos_v1 for part scope_e). src/ is not modified; the script checks that src/ equals the code of the S1/S2/S3 runs (git diff vs b32fe77, or the content hash below).",
+ "src_content_sha256": "e1d3139f7cba21885590231701db9953f1e5c3f7eb1cc21bce8aad451b900541",
+ "training": "identical to S2/S3: Adam 1e-4, weight decay 1e-4, batch 32, <= 30 epochs, early stopping patience 5 (min 5), best-validation checkpoint, test evaluated once. lambda = 0.5 inside L_TFB.",
+ "data": {
+  "ETTh1": "as in S2/S3 (sha256 f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066 when downloaded from the official ETDataset repository)",
+  "ETTh2": "official ETDataset repository, ETT-small/ETTh2.csv, sha256 a3dc2c597b9218c7ce1cd55eb77b283fd459a1d09d753063f944967dd6b9218b, 17420 rows; same 12/4/4-month chronological split and train-only z-score as ETTh1"
+ },
+ "parts": {
+  "mechanism": {
+   "question": "Why does TFB hurt? (a) which TFB component causes the harm; (b) the timing-loss hypothesis",
+   "setting": "F, ETTh1, H = 96",
+   "seeds": [42, 123, 456, 789, 2024],
+   "arms": {
+    "a0": "alpha = 0 (task loss only)",
+    "full_a0.1": "alpha = 0.1, full L_TFB = lambda (L_T + L_F) + (1 - lambda) L_B",
+    "T_a0.1": "alpha = 0.1 x lambda L_T only (time-domain contrastive term)",
+    "F_a0.1": "alpha = 0.1 x lambda L_F only (frequency-domain contrastive term)",
+    "B_a0.1": "alpha = 0.1 x (1 - lambda) L_B only (time-frequency balance / alignment term)"
+   },
+   "component_note": "each component keeps exactly the coefficient it has inside the full objective, so the three component arms decompose the full alpha = 0.1 objective; implemented by replacing train.tfb_total_loss inside the run process only (src/ unchanged), verified by the --selftest checks",
+   "probes": {
+    "P1_shift_sensitivity": "for every validation window x and circular time shifts tau in {1, 4, 12} hours of the input window: relative sensitivity R_e(tau) = mean cosine distance(e(x), e(roll(x, tau))) / mean cosine distance(e(x), e(x')) with x' a different validation window (fixed random pairing, seed 0); e in {z_F (pooled FD embedding), z_T (pooled TD embedding), h_TD (TD patch embeddings averaged over variables and flattened over patches; the TD representation the forecasting head receives)}. R is reported as the mean over tau.",
+    "P1_theory": "the FD encoder sees the magnitude of the rFFT of the RevIN-normalised window, which is exactly invariant to circular time shift; hence R_zF = 0 up to floating point for any weights. Pulling z_T towards z_F (the balance term) is therefore expected to remove timing information from the TD path (the timing-loss hypothesis).",
+    "P2_phase_decodability": "ridge regression (closed form, lambda = 1, standardised features) from features to (sin, cos) of 2 pi h / 24, h = hour of day of the first forecast step; fitted on all training windows, R^2 averaged over the two outputs on all validation windows; features: z_T and h_last = TD embedding of the last input patch averaged over variables",
+    "P3_gradient_alignment": "descriptive: cosine between the gradients of the task loss and of each TFB component with respect to the TD-encoder and FD-encoder parameters, averaged over 20 training batches (fixed order, torch seed 0), at the selected checkpoint of the alpha = 0 run and at initialisation"
+   },
+   "decision_rules": {
+    "M_a_premise": "R_zF < 0.01 for every run (verifies the invariance the hypothesis rests on)",
+    "M_b": "R_zT at full_a0.1 lower than at a0 on >= 4 of 5 seeds",
+    "M_c": "phase R^2 from z_T at full_a0.1 lower than at a0 on >= 4 of 5 seeds",
+    "M_d_attribution": "the B_a0.1 arm (balance term alone) has higher test RMSE than a0 on >= 4 of 5 seeds AND lower R_zT than a0 on >= 4 of 5 seeds",
+    "timing_loss_hypothesis": "SUPPORTED iff M_a and M_b and M_c and M_d. If M_b and M_c hold but the harm and the loss of timing information come from T_a0.1 rather than B_a0.1, the harm is attributed to the time-domain contrastive invariance (L_T), not to the alignment. Otherwise NOT SUPPORTED and the mechanism remains open.",
+    "component_attribution": "descriptive: paired mean difference in test RMSE to a0 per arm with 95 % bootstrap CI and the number of seeds worse; 5 seeds give no significance test (minimum two-sided Wilcoxon p = 0.0625), which is stated as a limitation"
+   }
+  },
+  "scope_f": {
+   "question": "Is the S3 failure general for F across a second dataset and a longer horizon?",
+   "settings": {
+    "ETTh2_H96": {"dataset": "ETTh2", "pred_len": 96, "alphas": [0.0, 0.01, 0.1]},
+    "ETTh1_H336": {"dataset": "ETTh1", "pred_len": 336, "alphas": [0.0, 0.1]}
+   },
+   "seeds": "the 10 predeclared seeds",
+   "decision_rule": "per setting, exactly the S3 rule: alpha* = arm with the lowest mean best-validation MSE over the 10 seeds (alpha = 0 included); H1 supported iff alpha* > 0 AND Wilcoxon p < 0.05 AND bootstrap CI of the paired test-RMSE difference excludes 0. The failure GENERALISES to the setting iff alpha* = 0 AND every alpha > 0 has higher test RMSE than alpha = 0 with Holm-adjusted Wilcoxon p < 0.05.",
+   "note": "alpha grid reduced to the decisive values (0.01: smallest harm in S3; 0.1: saturated harm) to stay within the GPU budget"
+  },
+  "scope_e": {
+   "question": "Does the failure hold for the original GPT-2 setting (model E)?",
+   "setting": "E (GPT-2, layer norms + position embeddings trained), ETTh1, H = 96",
+   "seeds": [42, 123, 456, 789, 2024],
+   "alphas": [0.0, 0.1],
+   "probes": "P1 and P2 as in part mechanism (computed on the TD/FD encoders, which precede GPT-2)",
+   "decision_rule": "5 paired seeds (cost: about 47 min per E run). The failure GENERALISES to E iff alpha = 0.1 has higher test RMSE on >= 4 of 5 seeds AND the bootstrap CI of the paired difference excludes 0. TFB HELPS E iff alpha = 0.1 has lower mean best-validation MSE AND lower test RMSE on >= 4 of 5 seeds AND the CI excludes 0. Otherwise inconclusive. No significance claim is made with 5 seeds."
+  }
+ },
+ "budget": "mechanism 25 F runs (about 6 GPU-h); scope_f 50 F runs (about 12 GPU-h); scope_e 10 E runs (about 8 GPU-h). Three separate Kaggle sessions (each < 7 h on 2x T4); jobs ordered seed by seed so that an interrupted session leaves complete paired sets; only complete paired sets are analysed.",
+ "after_R1": "per the supervisor: decide whether to redesign TFB to preserve temporal information (a revised objective would be declared, implemented, verified and validated with the S3 protocol before any scheduler experiment)"
+}
