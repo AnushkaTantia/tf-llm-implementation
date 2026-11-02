@@ -1,0 +1,7 @@
+Stage 3: fixed alpha grid on the frozen forecaster (alpha = 0 is in the Stage 2 results)
+
+alpha 0.01   n=10  best val MSE 0.7394±0.0121  test MSE 0.3796±0.0055  SMAPE 38.10
+alpha 0.03   n=10  best val MSE 0.7750±0.0159  test MSE 0.3955±0.0055  SMAPE 38.83
+alpha 0.1    n=10  best val MSE 0.7823±0.0109  test MSE 0.3955±0.0051  SMAPE 38.85
+alpha 0.3    n=10  best val MSE 0.7851±0.0149  test MSE 0.3987±0.0061  SMAPE 39.33
+alpha 1.0    n=10  best val MSE 0.7858±0.0178  test MSE 0.3994±0.0051  SMAPE 39.40
