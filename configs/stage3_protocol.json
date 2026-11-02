@@ -1,0 +1,21 @@
+{
+ "stage": "S3: does the auxiliary TFB objective help? (H1)",
+ "declared_on": "2026-11-02, before any S3 run",
+ "forecaster": "configs/frozen_forecaster.json (F_flatten_noLLM_v1), unchanged",
+ "arms": {
+  "alpha_0": "re-used from Stage 2 (same code in src/, same configuration and seeds; Stage 2 showed bit-identical results across Kaggle sessions for seeds 42/123/456)",
+  "fixed_alpha_grid": [0.01, 0.03, 0.1, 0.3, 1.0]
+ },
+ "grid_rationale": "log-spaced over two decades; at alpha = 1 the weighted TFB term (~1.9) is about six times the task loss (~0.33), at alpha = 0.01 it is about 6 % of it; 0.3 is the weight used in all earlier experiments",
+ "seeds": "the 10 predeclared seeds of the frozen configuration",
+ "training": "identical to Stage 2: Adam 1e-4, weight decay 1e-4, batch 32, <= 30 epochs, early stopping patience 5 (min 5), best-validation checkpoint, test evaluated once",
+ "alpha_star_selection": "alpha* = the arm (alpha = 0 included) with the lowest MEAN best-validation MSE over the 10 seeds. Validation only; test results are never used for selection. Averaging over seeds is required because Stage 2 showed validation and test MSE are not rank-correlated across seeds (rho = -0.21).",
+ "primary_test": "paired by seed: test RMSE of alpha* minus alpha = 0. Wilcoxon signed-rank (two-sided) and paired permutation test (10 000 sign flips); 95 % bootstrap CI of the mean paired difference; Cliff's delta",
+ "secondary": "each fixed alpha vs alpha = 0 (Holm-corrected over the 5 comparisons); dose-response of validation and test error against alpha; whether the TFB loss is actually reduced by training (train_tfb with alpha > 0 vs alpha = 0); MAE, SMAPE, per-step and per-variable MSE",
+ "decision_rule": {
+  "H1_supported": "alpha* > 0 AND alpha* has lower test RMSE than alpha = 0 with p < 0.05 (Wilcoxon) AND the bootstrap CI of the paired difference excludes 0",
+  "practically_meaningful": "mean improvement larger than the seed-to-seed sd of alpha = 0 (Stage 2: 0.0028 MSE)",
+  "H1_not_supported": "otherwise. Per the research plan the scheduler study (S4) is then NOT started; the central premise is reassessed with the supervisor first",
+  "fixed_alpha_is_a_meaningful_baseline": "if alpha* > 0, the calibrated fixed alpha* is the critical comparator of S4"
+ }
+}

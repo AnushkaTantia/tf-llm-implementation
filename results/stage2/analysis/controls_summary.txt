@@ -1,0 +1,9 @@
+S2 controls, ETTh1 H=96, test split (independent loader and metrics)
+
+train_mean           n= 1  MSE 1.1099±0.0000  RMSE 1.0535±0.0000  MAE 0.7960±0.0000  SMAPE 61.96±0.00
+last_value           n= 1  MSE 1.2944±0.0000  RMSE 1.1377±0.0000  MAE 0.7132±0.0000  SMAPE 54.83±0.00
+window_mean          n= 1  MSE 0.7086±0.0000  RMSE 0.8418±0.0000  MAE 0.5730±0.0000  SMAPE 48.19±0.00
+seasonal_naive_24h   n= 1  MSE 0.5122±0.0000  RMSE 0.7157±0.0000  MAE 0.4333±0.0000  SMAPE 38.72±0.00
+seasonal_naive_168h  n= 1  MSE 0.6570±0.0000  RMSE 0.8105±0.0000  MAE 0.5086±0.0000  SMAPE 44.61±0.00
+DLinear              n=10  MSE 0.3742±0.0044  RMSE 0.6117±0.0036  MAE 0.3995±0.0051  SMAPE 37.64±0.57
+RevIN_Linear         n=10  MSE 0.3737±0.0016  RMSE 0.6113±0.0013  MAE 0.3983±0.0020  SMAPE 37.71±0.14
