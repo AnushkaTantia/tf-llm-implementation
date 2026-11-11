@@ -1,0 +1,76 @@
+{
+ "stage": "X: RAFT (Relational Alignment of Frequency and Time with conflict-free gradients), the proposed method",
+ "declared_on": "2026-11-11, after the user's and supervisor's approval of the pivot (D-F1..D-F5) and before any Stage X run",
+ "title": "RAFT: Relational Time-Frequency Alignment with Conflict-Free Gradients for Long-Horizon Time Series Forecasting",
+ "forecaster": "configs/frozen_forecaster.json F_flatten_noLLM_v1, unchanged training configuration (Adam 1e-4, wd 1e-4, batch 32, <= 30 epochs, patience 5, min 5, best-validation checkpoint, test once). Baseline arms ('none', 'tfb_*') run the S2-R1 code path; RAFT arms use src/raft.py (RAFTForecaster with RAFTFDEncoder).",
+ "src_content_sha256": "04871702873ddb09c57b7c76837be04e7179c1ebcd1a1e9736458e59b126ac04",
+ "arms": {
+  "none": "alpha = 0: forecasting loss only (original model F)",
+  "tfb_a<x>": "TFB objective of Zhang et al. (Neural Networks 199, 108687, 2026) as implemented in S2-R1, fixed weight x (original model F). Breadth/few-shot use x = 0.01, the best positive weight on validation in S3 (most favourable to the previous method).",
+  "raft_a<x>": "RAFT: L_RT + L_TF with weight x, conflict-free projection, RAFT FD branch",
+  "raft_rt_a<x>": "ablation: L_RT only (+ projection, RAFT FD branch)",
+  "raft_tf_a<x>": "ablation: L_TF only (+ projection, RAFT FD branch)",
+  "raft_noproj_a<x>": "ablation: L_RT + L_TF, plain weighted sum (no projection)",
+  "fdfix": "ablation: RAFT FD branch, no auxiliary loss"
+ },
+ "datasets": {
+  "ETTh1": {"lookback": 512, "horizons": [96, 192, 336, 720], "split": "12/4/4 months"},
+  "ETTh2": {"lookback": 512, "horizons": [96, 192, 336, 720], "split": "12/4/4 months"},
+  "ETTm1": {"lookback": 512, "horizons": [96, 192, 336, 720], "split": "12/4/4 months (15 min)"},
+  "ETTm2": {"lookback": 512, "horizons": [96, 192, 336, 720], "split": "12/4/4 months (15 min)"},
+  "Exchange": {"lookback": 512, "horizons": [96, 192, 336, 720], "split": "70/10/20"},
+  "Weather": {"lookback": 512, "horizons": [96, 192, 336, 720], "split": "70/10/20"},
+  "ILI": {"lookback": 96, "horizons": [24, 36, 48, 60], "split": "70/10/20", "note": "966 rows: look-back 512 impossible; 96 = 6 patches of 16"}
+ },
+ "data_sources": "ETT: github.com/zhouhaoyi/ETDataset (ETT-small). Exchange, Weather, ILI: Time-Series-Library benchmark files (huggingface.co/datasets/thuml/Time-Series-Library), or the same files attached as a Kaggle input. sha256 of every file used is recorded in each part's protocol.json.",
+ "parts": {
+  "pilot": {
+   "id": "X0",
+   "settings": ["ETTh1_H96", "ETTh2_H96"],
+   "seeds": [42, 123, 456],
+   "arms": ["none", "raft_a0.1", "raft_a0.3", "raft_a1", "raft_rt_a0.3", "fdfix"],
+   "selection_rule": "Among the RAFT candidates {raft_a0.1, raft_a0.3, raft_a1, raft_rt_a0.3}, select the arm with the lowest mean over the two settings of r = mean best-validation MSE (3 seeds) / mean best-validation MSE of 'none' (same seeds). Ties (|difference| < 1e-4): smaller alpha. Test data are not used.",
+   "go_rule": "GO if the selected arm has r <= 1.005 in both settings. If not, the selected arm is still carried forward (it is the best available) and the report states that C2 is not expected to hold.",
+   "fdfix_role": "descriptive ablation (architecture effect without auxiliary loss); not eligible for selection"
+  },
+  "core": {
+   "id": "X1",
+   "settings": ["ETTh1_H96", "ETTh2_H96", "ETTh1_H336"],
+   "seeds": [42, 123, 456, 789, 2024, 1, 7, 21, 100, 999],
+   "arms": ["<selected RAFT arm>", "tfb_a0.01 (ETTh1_H336 only; ETTh1_H96 and ETTh2_H96 exist from S3/R1)"],
+   "reused": "'none' (10 seeds) and tfb_a0.01 / tfb_a0.1 for ETTh1_H96 (S2/S3) and ETTh2_H96 (R1), 'none' and tfb_a0.1 for ETTh1_H336 (R1): same code path; cross-session reproduction to < 5e-5 test MSE was verified in R1."
+  },
+  "ablation": {
+   "id": "X2",
+   "settings": ["ETTh1_H96", "ETTh2_H96"],
+   "seeds": [42, 123, 456, 789, 2024],
+   "arms": ["raft_rt_a*", "raft_tf_a*", "raft_noproj_a*", "fdfix", "<selected RAFT arm>", "none"],
+   "note": "a* = alpha of the selected arm; pilot runs on seeds 42/123/456 are reused where the arm is identical"
+  },
+  "breadth": {
+   "id": "X3",
+   "seeds": [42, 123, 456],
+   "arms": ["none", "tfb_a0.01", "<selected RAFT arm>"],
+   "groups": {
+    "a": ["ETTh1_H192", "ETTh1_H720", "ETTh2_H192", "ETTh2_H336", "ETTh2_H720", "Exchange_H96", "Exchange_H192", "Exchange_H336", "Exchange_H720", "ILI_H24", "ILI_H36", "ILI_H48", "ILI_H60"],
+    "b": ["ETTm1_H96", "ETTm1_H336", "ETTm2_H96", "ETTm2_H336"],
+    "c": ["Weather_H96", "Weather_H336"],
+    "d_optional": ["ETTm1_H192", "ETTm1_H720", "ETTm2_H192", "ETTm2_H720", "Weather_H192", "Weather_H720"]
+   }
+  },
+  "fewshot": {
+   "id": "X4",
+   "percent": 10,
+   "settings": ["ETTh1_H96", "ETTh2_H96", "ETTm1_H96", "Weather_H96"],
+   "seeds": [42, 123, 456],
+   "arms": ["none", "tfb_a0.01", "<selected RAFT arm>"]
+  }
+ },
+ "claims_and_tests": {
+  "C1": "RAFT beats the TFB objective of Zhang et al.: paired test-RMSE difference RAFT - tfb per setting (mean, 95% bootstrap CI, seeds better); 10-seed settings: two-sided Wilcoxon signed-rank, Holm over settings; all settings: Wilcoxon signed-rank on per-setting mean differences, and Friedman + Nemenyi over arms {none, tfb, RAFT, DLinear, RevIN-Linear}.",
+  "C2": "RAFT is not worse than 'none': 10-seed settings non-inferior if the upper 95% bootstrap CI of the paired difference RAFT - none is below 0.005 x mean RMSE of 'none'.",
+  "C3": "RAFT improves on 'none': 10-seed settings Holm-adjusted Wilcoxon p < 0.05 with CI below 0; breadth: Wilcoxon over per-setting mean differences, wins/ties/losses.",
+  "metrics": "test RMSE (primary), MSE, MAE in z-scored space; SMAPE in original units; per horizon step and per variable",
+  "selection": "only validation error selects anything; test evaluated once per run"
+ }
+}

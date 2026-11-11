@@ -102,7 +102,8 @@ class TFLLMForecaster(nn.Module):
         assert head_type in HEAD_TYPES, f"head_type must be one of {HEAD_TYPES}"
         if head_type == "mask":
             assert backbone.use_llm, "the mask head needs the LLM (use_llm=True)"
-        assert seq_len % patch_len == 0 and pred_len % patch_len == 0
+        assert seq_len % patch_len == 0
+        assert head_type == "flatten" or pred_len % patch_len == 0, "the mask head needs pred_len divisible by patch_len"
         self.td_encoder = td_encoder
         self.fd_encoder = fd_encoder
         self.backbone = backbone
