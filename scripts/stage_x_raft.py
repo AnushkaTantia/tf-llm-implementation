@@ -86,6 +86,11 @@ def jobs_for(args, P):
     if args.settings:
         keep = set(args.settings.split(","))
         J = [j for j in J if j["setting"] in keep]
+    if getattr(args, "arms", None):
+        keep = set(a.strip().replace("-", "_") for a in args.arms.split(","))
+        J = [j for j in J if j["arm"] in keep]
+    for j in J:
+        arm_parse(j["arm"])                       # every arm must parse before anything runs
     return J
 
 
@@ -310,6 +315,7 @@ def main():
     ap.add_argument("--raft_arm", default=None, help="selected RAFT arm from the pilot, e.g. raft_a0.3")
     ap.add_argument("--group", default="a", help="breadth groups, e.g. a or a,b")
     ap.add_argument("--settings", default=None, help="optional comma list to restrict settings")
+    ap.add_argument("--arms", default=None, help="optional comma list to restrict arms (e.g. only the missing RAFT arms)")
     ap.add_argument("--gpus", default="0,1")
     ap.add_argument("--per_gpu", type=int, default=2)
     ap.add_argument("--data_dir", default=None)
@@ -325,8 +331,15 @@ def main():
         csv = find_or_get("ETTh1.csv", args.out or "/tmp/stage_x_selftest")
         sys.exit(0 if selftest(csv) else 1)
     assert args.out, "--out is required"
+    if args.raft_arm:
+        args.raft_arm = args.raft_arm.strip().replace("-", "_")
+        try:
+            k, v, al = arm_parse(args.raft_arm)
+            assert k == "raft" and v == "raft" and al > 0
+        except Exception:
+            sys.exit(f"STOP: --raft_arm {args.raft_arm!r} is not a valid RAFT arm (expected e.g. raft_a1)")
     if args.part in ("core", "ablation", "breadth", "fewshot"):
-        assert args.raft_arm and args.raft_arm.startswith("raft"), "--raft_arm (selected in the pilot) is required"
+        assert args.raft_arm, "--raft_arm (selected in the pilot) is required"
     P = json.load(open(PROT))
     h = src_hash()
     print(f"code check: src/ content sha256 {h[:12]} (declared {P['src_content_sha256'][:12]})", flush=True)
