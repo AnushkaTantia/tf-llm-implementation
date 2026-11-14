@@ -79,6 +79,8 @@ def jobs_for(args, P):
     elif args.part == "fewshot":
         pc = pp["fewshot"]["percent"]
         add([f"{s}_p{pc}" for s in pp["fewshot"]["settings"]], ["none", "tfb_a0.01", args.raft_arm], pp["fewshot"]["seeds"])
+    elif args.part == "probe":                    # post-hoc representation analysis (no selection, no claim test)
+        add(["ETTh1_H96", "ETTh2_H96"], ["none", "tfb_a0.1", args.raft_arm], [42, 123, 456])
     elif args.part == "timing":
         for st in ["ETTh1_H96", "ETTm1_H96", "Exchange_H96", "ILI_H24", "Weather_H96"]:
             for a in ["none", "tfb_a0.01", args.raft_arm or "raft_a0.3"]:
@@ -237,11 +239,54 @@ def worker(args):
     n = len(ds)
     out["test_mse_per_step"] = [round(float(v) / (n * V), 6) for v in se_t]
     out["test_mse_per_variable"] = [round(float(v) / (n * pred_len), 6) for v in se_v]
+    if args.part == "probe" or os.environ.get("STAGE_PROBE") == "1":
+        out.update(representation_probe(f, ds, dev))
     json.dump(out, open(os.path.join(run_dir, "result.json"), "w"), indent=1)
     p = os.path.join(run_dir, "best_model.pt")
     if os.path.exists(p):
         os.remove(p)
     print("RESULT", json.dumps({k: v for k, v in out.items() if not isinstance(v, list)}), flush=True)
+
+
+def representation_probe(f, ds, dev, n_groups=40, group=32, seed=0):
+    """
+    Post-hoc probe of the representation the head reads, on TEST windows (no training, no selection).
+    Groups of `group` random windows (all variables = one instance each), like a training batch:
+      D_h   mean cosine distance between TD representations h_i of different instances (dispersion)
+      D_u   same for the per-variable FD representations u_i
+      rho   Spearman correlation between cos(h_i, h_j) and -delta_ij (distance of normalised futures)
+      kl    KL(P || Q_h) of RAFT (tau 0.1): mismatch between future and representation neighbourhoods
+    """
+    import torch
+    import torch.nn.functional as Fn
+    import raft as R
+    g = torch.Generator().manual_seed(seed)
+    vals = {"D_h": [], "D_u": [], "rho": [], "kl": []}
+    f.eval()
+    n = len(ds)
+    with torch.no_grad():
+        for _ in range(n_groups):
+            idx = torch.randperm(n, generator=g)[:min(group, n)].tolist()
+            b = [ds[i] for i in idx]
+            x = torch.stack([e["x"] for e in b]).to(dev); xp = torch.stack([e["x_patched"] for e in b]).to(dev)
+            y = torch.stack([e["y"] for e in b]).to(dev)
+            _, aux = f(xp, x)
+            td = aux["td_patch_embeddings"]                                   # (B, P, V, d)
+            B, P_, V, d = td.shape
+            h = td.permute(0, 2, 1, 3).reshape(B * V, -1)
+            mean, std = f.revin.stats(x)
+            u = f.fd_encoder.pooled_per_variable(f.revin.norm(x, mean, std)).reshape(B * V, -1)
+            yr = ((y - mean) / std).permute(0, 2, 1).reshape(B * V, -1)
+            off = ~torch.eye(B * V, dtype=torch.bool, device=h.device)
+            hn, un = Fn.normalize(h, dim=1), Fn.normalize(u, dim=1)
+            ch, cu = hn @ hn.t(), un @ un.t()
+            vals["D_h"].append(float((1 - ch[off]).mean())); vals["D_u"].append(float((1 - cu[off]).mean()))
+            dlt = torch.cdist(yr, yr).pow(2)[off] / yr.shape[1]
+            a, c = ch[off].double().cpu(), (-dlt).double().cpu()
+            ra, rc = a.argsort().argsort().double(), c.argsort().argsort().double()
+            vals["rho"].append(float(torch.corrcoef(torch.stack([ra, rc]))[0, 1]))
+            vals["kl"].append(float(R.relational_kl(R.target_similarity(yr), h, 0.1)))
+    return {f"probe_{k}": sum(v) / len(v) for k, v in vals.items()}
 
 
 # ----------------------------------------------------------------------------------------------- checks
@@ -310,7 +355,7 @@ def summarize(out):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--part", required=True,
-                    choices=["pilot", "core", "ablation", "breadth", "fewshot", "timing", "selftest", "selftest_job"])
+                    choices=["pilot", "core", "ablation", "breadth", "fewshot", "timing", "probe", "selftest", "selftest_job"])
     ap.add_argument("--out", default=None)
     ap.add_argument("--raft_arm", default=None, help="selected RAFT arm from the pilot, e.g. raft_a0.3")
     ap.add_argument("--group", default="a", help="breadth groups, e.g. a or a,b")
@@ -338,7 +383,7 @@ def main():
             assert k == "raft" and v == "raft" and al > 0
         except Exception:
             sys.exit(f"STOP: --raft_arm {args.raft_arm!r} is not a valid RAFT arm (expected e.g. raft_a1)")
-    if args.part in ("core", "ablation", "breadth", "fewshot"):
+    if args.part in ("core", "ablation", "breadth", "fewshot", "probe"):
         assert args.raft_arm, "--raft_arm (selected in the pilot) is required"
     P = json.load(open(PROT))
     h = src_hash()

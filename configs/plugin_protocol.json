@@ -1,0 +1,81 @@
+{
+ "stage": "P",
+ "declared_on": "2026-11-13",
+ "title": "RAFT as a plug-in objective for published forecasters (PatchTST, iTransformer)",
+ "question": "Does the RAFT auxiliary objective (target-aware relational loss L_RT + conflict-free update), with tau=0.1 and N_max=512 as for F, and the weight alpha selected per backbone on validation data by the same rule as for F, improve published forecasters of different design (channel-independent PatchTST; channel-mixing iTransformer)?",
+ "backbones": [
+  "patchtst",
+  "itransformer"
+ ],
+ "arms": [
+  "base",
+  "raft_a<alpha selected per backbone in the pilot>"
+ ],
+ "raft": {
+  "alpha": "selected per backbone in the pilot from {0.1, 0.3, 1}",
+  "tau": 0.1,
+  "max_n": 512,
+  "losses": "L_RT only (these backbones have no frequency branch, so L_TF and the FD component do not apply)",
+  "update": "conflict-free: g = g_task + alpha * Pi(g_aux)"
+ },
+ "settings": [
+  "ETTh1_H96",
+  "ETTh1_H192",
+  "ETTh1_H336",
+  "ETTh1_H720",
+  "ETTh2_H96",
+  "ETTh2_H192",
+  "ETTh2_H336",
+  "ETTh2_H720",
+  "ETTm1_H96",
+  "ETTm1_H336",
+  "ETTm2_H96",
+  "ETTm2_H336",
+  "Exchange_H96",
+  "Exchange_H192",
+  "Exchange_H336",
+  "Exchange_H720",
+  "ILI_H24",
+  "ILI_H36",
+  "ILI_H48",
+  "ILI_H60",
+  "Weather_H96",
+  "Weather_H336"
+ ],
+ "seeds": [
+  42,
+  123,
+  456
+ ],
+ "backbone_settings": "official per-dataset hyperparameters and look-back of each model (PatchTST_supervised scripts: L=336, ILI L=104; iTransformer scripts: L=96, ILI L=36); Exchange uses the PatchTST ETTh configuration (no official script). Same splits, scaling and data files as Stage X.",
+ "training": {
+  "patchtst": {
+   "max_epochs": 30,
+   "patience": 10,
+   "lr_schedule": "type3: constant for 3 epochs, then x0.9 per epoch"
+  },
+  "itransformer": {
+   "max_epochs": 10,
+   "patience": 3,
+   "lr_schedule": "type1: halved every epoch"
+  }
+ },
+ "selection": "best validation MSE checkpoint; test evaluated once; nothing is tuned on test",
+ "claims_and_tests": {
+  "P1": "RAFT improves each backbone: per backbone, Wilcoxon signed-rank test on the per-setting mean paired differences in test RMSE (raft - base) over the 22 settings, two-sided; wins/ties/losses at 0.1%; per-setting 95% bootstrap CI over the 3 paired seeds (descriptive).",
+  "P2": "Overall: Friedman test and Nemenyi CD over methods {F, F+TFB, F+RAFT, PatchTST, PatchTST+RAFT, iTransformer, iTransformer+RAFT, DLinear, RevIN-Linear} on the settings where all are available."
+ },
+ "note": "Post-hoc and secondary: conflict rate and cosine of the gradients.",
+ "pilot": {
+  "settings": [
+   "ETTh1_H96",
+   "ETTh2_H96"
+  ],
+  "alphas": [
+   0.1,
+   0.3,
+   1.0
+  ],
+  "rule": "Per backbone, select the alpha with the lowest mean over the pilot settings of (mean best-validation MSE of RAFT / that of base, same 3 seeds). Ties (<1e-4): smaller alpha. Test data are not used. The selected alpha is used for all 22 settings of that backbone; if no alpha has ratio < 1 it is still carried forward and the report states that no improvement is expected."
+ }
+}
