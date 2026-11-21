@@ -1,0 +1,157 @@
+{
+ "stage": "J: journal version of RAFT -- comparisons with competing objectives and gradient combiners, sensitivity, representation analysis, Electricity, and the GPT-2 forecaster",
+ "declared_on": "2026-11-21, before any Stage J run",
+ "src_content_sha256": "04871702873ddb09c57b7c76837be04e7179c1ebcd1a1e9736458e59b126ac04",
+ "src_note": "src/ is unchanged from Stage X (tag x-declared). All new code is in journal/ (raft_j.py, run_j.py, test_j.py).",
+ "journal_content_sha256": "cc0563705e235adb4d7f7d05cec0ed3d314024318ae9099af0373a3776189c52",
+ "forecaster": "configs/frozen_forecaster.json: F (flatten head, no LLM) with the unchanged training configuration; part 'llm' uses the declared confirmation model E (GPT-2, flatten head, LLM policy norms_pos) with the same training configuration.",
+ "arms": {
+  "none, tfb_a<x>, raft_a<x>, raft_rt_a<x>, raft_noproj_a<x>": "exactly the Stage X code paths",
+  "rnc_cf_a<x>": "Rank-N-Contrast (Zha et al., NeurIPS 2023) on the TD representation, ranked by the distance between the normalised futures (in place of L_RT), RAFT FD branch, conflict-free update; same similarity (cosine / tau, tau = 0.1) and the same instance cap (512) as RAFT",
+  "rnctf_cf_a<x>": "RnC in place of L_RT, plus RAFT's L_TF, conflict-free update",
+  "raft_pc_a1": "RAFT losses (L_RT + L_TF), combined with the forecasting gradient by PCGrad (Yu et al., NeurIPS 2020)",
+  "raft_gs_a1": "RAFT losses, gradient-similarity gating (Du et al., 2018): g_aux used only when cos(g_task, g_aux) > 0",
+  "raft_cf_a1_tau<t>": "RAFT with temperature t in both relational losses (default 0.1)",
+  "e_<arm>": "the same arm on the GPT-2 forecaster E"
+ },
+ "datasets": {
+  "ETTh1": {
+   "lookback": 512,
+   "split": "12/4/4 months"
+  },
+  "ETTh2": {
+   "lookback": 512,
+   "split": "12/4/4 months"
+  },
+  "ECL": {
+   "lookback": 96,
+   "train_stride": 4,
+   "split": "70/10/20",
+   "file": "electricity.csv (321 variables), Time-Series-Library benchmark file",
+   "note": "look-back 96 is the standard setting of the iTransformer / TimesNet benchmark; every 4th training window is used because the full training set (18,317 windows x 321 variables) exceeds the available compute; validation and test use all windows",
+   "batch_size": 8,
+   "batch_note": "batch of 8 windows (8 x 321 = 2568 variable instances per step) for all arms: at the default 32 windows the base forecaster's per-variable FD encoder needs about 30 GB of activations, more than a 16 GB T4; validation/test are evaluated in batches of 8"
+  }
+ },
+ "parts": {
+  "comp": {
+   "settings": [
+    "ETTh1_H96",
+    "ETTh2_H96"
+   ],
+   "seeds": [
+    42,
+    123,
+    456,
+    789,
+    2024
+   ],
+   "arms": [
+    "rnc_cf_a0.1",
+    "rnc_cf_a0.3",
+    "rnc_cf_a1",
+    "rnctf_cf_a0.1",
+    "rnctf_cf_a0.3",
+    "rnctf_cf_a1",
+    "raft_pc_a1",
+    "raft_gs_a1"
+   ],
+   "reused": "none, raft_a1, raft_rt_a1, raft_noproj_a1 on the same settings and seeds from the Stage X ablation (identical code path)",
+   "selection_rule": "For rnc_cf and rnctf_cf separately: the weight with the lowest mean over the two settings of r = mean best-validation MSE / mean best-validation MSE of 'none' (same seeds); ties (|difference| < 1e-4): smaller weight. Test data are not used.",
+   "tests": "RAFT (raft_a1) against each competitor {selected rnc_cf, selected rnctf_cf, raft_pc_a1, raft_gs_a1, raft_noproj_a1 (plain sum), raft_rt_a1}: paired test-RMSE differences over the 10 (setting, seed) pairs; mean, 95% bootstrap CI, seeds better, exact two-sided Wilcoxon signed-rank test, Holm-adjusted over the competitors.",
+   "per_gpu": 2
+  },
+  "sens": {
+   "settings": [
+    "ETTh1_H96",
+    "ETTh2_H96"
+   ],
+   "seeds": [
+    42,
+    123,
+    456
+   ],
+   "arms": [
+    "raft_a3",
+    "raft_cf_a1_tau0.05",
+    "raft_cf_a1_tau0.5"
+   ],
+   "reused": "none, raft_a0.1, raft_a0.3, raft_a1 on the same seeds from the Stage X pilot",
+   "tests": "descriptive: validation ratio and test RMSE ratio against 'none' for alpha in {0.1, 0.3, 1, 3} and tau in {0.05, 0.1, 0.5}",
+   "per_gpu": 2
+  },
+  "probe": {
+   "settings": [
+    "ETTh1_H96",
+    "ETTh2_H96"
+   ],
+   "seeds": [
+    42,
+    123,
+    456
+   ],
+   "arms": [
+    "none",
+    "tfb_a0.01",
+    "tfb_a0.1",
+    "raft_a1"
+   ],
+   "embedding_seed": 42,
+   "tests": "descriptive: dispersion D_h and D_u, rank correlation rho between representation similarity and future similarity, KL(P || Q_h), on test windows (scripts/stage_x_raft.py representation_probe); two-dimensional embedding plot of the saved test representations of seed 42",
+   "per_gpu": 2
+  },
+  "ecl": {
+   "settings": [
+    "ECL_H96",
+    "ECL_H336"
+   ],
+   "seeds": [
+    42,
+    123,
+    456
+   ],
+   "arms": [
+    "none",
+    "tfb_a0.01",
+    "raft_a1"
+   ],
+   "controls": "DLinear and RevIN-Linear with the same splits, look-back, scaling and training-window stride (CPU, same recipe as the Stage X controls)",
+   "tests": "per setting: mean test RMSE over seeds, paired RMSE change of RAFT against TFB and against 'none', seeds better",
+   "per_gpu": 1
+  },
+  "cost": {
+   "settings": [
+    "ETTh1_H96"
+   ],
+   "seeds": [
+    42
+   ],
+   "arms": [
+    "none",
+    "tfb_a0.01",
+    "raft_a1"
+   ],
+   "max_epochs": 3,
+   "tests": "descriptive: seconds per training epoch, peak GPU memory, trainable parameters, inference time on the test set; one run at a time on one GPU (no other run sharing it)",
+   "per_gpu": 1
+  },
+  "llm": {
+   "settings": [
+    "ETTh1_H96"
+   ],
+   "seeds": [
+    42,
+    123,
+    456
+   ],
+   "arms": [
+    "e_none",
+    "e_tfb_a0.01",
+    "e_raft_a1"
+   ],
+   "tests": "paired test-RMSE change of RAFT against TFB and against 'none' on E, seeds better (three pairs: descriptive, no significance test)",
+   "per_gpu": 1
+  }
+ },
+ "selection": "only validation error selects anything; test evaluated once per run"
+}
