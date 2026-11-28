@@ -107,5 +107,29 @@ check("E + RAFT: GPT-2 trainable (norms/pos) parameters receive gradients", len(
 check("E + RAFT: other GPT-2 parameters stay frozen",
       all(not p.requires_grad for n_, p in f.backbone.gpt2.named_parameters() if ("ln" not in n_ and "wpe" not in n_)))
 
+# 6. amendment A1: release_graph changes no loss value, gradient or parameter update, and frees the step's graph
+def steps(wrap):
+    torch.manual_seed(0)
+    f, tfb = RJ.build_raft_model_any(num_features=3, pred_len=16, seq_len=64, head_type="flatten", use_llm=True, llm_policy="norms_pos")
+    f.train(); ps = [p for p in f.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(ps, lr=1e-3, weight_decay=0.05)
+    cl = R.make_compute_losses("raft", 1.0, {})
+    cl = RJ.release_graph(cl) if wrap else cl
+    vals = []
+    for k in range(3):
+        torch.manual_seed(10 + k)
+        x = torch.randn(2, 64, 3); xp = x.reshape(2, 4, 16, 3); yy = torch.randn(2, 16, 3)
+        out = cl(f, tfb, xp, x, yy)
+        opt.zero_grad(); out["total_loss"].backward(); opt.step()
+        vals.append((float(out["total_loss"]), float(out["task_loss"]), float(out["l_tfb"])))
+    return [p.detach().clone() for p in ps], vals, out
+pa_, va, oa = steps(False)
+pb_, vb, ob = steps(True)
+check("A1: release_graph gives bit-identical losses and parameters after 3 AdamW steps (E + RAFT)",
+      va == vb and all(torch.equal(a, b) for a, b in zip(pa_, pb_)))
+check("A1: returned task_loss and forecast hold no graph; total_loss still carries the update",
+      ob["task_loss"].grad_fn is None and ob["forecast"].grad_fn is None and oa["forecast"].grad_fn is not None
+      and ob["total_loss"].requires_grad)
+
 print(f"\n{len(FAILS)} failed" if FAILS else "\nall Stage J checks passed")
 sys.exit(1 if FAILS else 0)

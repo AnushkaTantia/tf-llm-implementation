@@ -122,6 +122,8 @@ def worker(args):
     elif a["kind"] == "j":
         T.build_model = RJ.build_raft_model_any
         T.compute_losses = RJ.make_compute_losses_j(a["aux"], a["comb"], a["alpha"], stats, tau=a["tau"])
+    if a["llm"] and a["kind"] in ("raft", "j"):                  # amendment A1: release each step's graph (GPT-2 memory)
+        T.compute_losses = RJ.release_graph(T.compute_losses)
     use_llm = a["llm"]
     E = C["confirmation_model"]
     run_dir = os.path.join(args.out, "runs", job_id(j))

@@ -3,7 +3,7 @@
  "declared_on": "2026-11-21, before any Stage J run",
  "src_content_sha256": "04871702873ddb09c57b7c76837be04e7179c1ebcd1a1e9736458e59b126ac04",
  "src_note": "src/ is unchanged from Stage X (tag x-declared). All new code is in journal/ (raft_j.py, run_j.py, test_j.py).",
- "journal_content_sha256": "cc0563705e235adb4d7f7d05cec0ed3d314024318ae9099af0373a3776189c52",
+ "journal_content_sha256": "477c9f6bd5ac4f212ebc25a6e1ab313fde72279c658aedd8ed02f8250310f963",
  "forecaster": "configs/frozen_forecaster.json: F (flatten head, no LLM) with the unchanged training configuration; part 'llm' uses the declared confirmation model E (GPT-2, flatten head, LLM policy norms_pos) with the same training configuration.",
  "arms": {
   "none, tfb_a<x>, raft_a<x>, raft_rt_a<x>, raft_noproj_a<x>": "exactly the Stage X code paths",
@@ -153,5 +153,16 @@
    "per_gpu": 1
   }
  },
- "selection": "only validation error selects anything; test evaluated once per run"
+ "selection": "only validation error selects anything; test evaluated once per run",
+ "amendments": [
+  {
+   "id": "A1",
+   "declared_on": "2026-11-24, before any e_raft_a1 run had produced a result",
+   "reason": "All three e_raft_a1 runs (session 2) stopped in their first training steps with CUDA out of memory on a 16 GB T4 and produced no result. The projected RAFT update takes the forecasting gradient with retain_graph=True inside compute_losses; the returned task_loss and forecast kept the forward graph through GPT-2 alive until the next step had built its own, so two steps of GPT-2 activations were held at once.",
+   "change": "journal/raft_j.py: release_graph() returns compute_losses with the returned task_loss and forecast detached, so each step's graph is released at the end of the step; journal/run_j.py applies it to the arms of the GPT-2 forecaster E that use the projected update (e_raft_a1). Loss values, gradients and parameter updates are unchanged (journal/test_j.py check 6: bit-identical losses and parameters after three AdamW steps). The notebook also sets PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True for the llm part (allocator setting only).",
+   "affects": "only e_raft_a1; e_none and e_tfb_a0.01 (completed) and every arm on the base forecaster F use exactly the code path of the original declaration",
+   "previous_journal_content_sha256": "cc0563705e235adb4d7f7d05cec0ed3d314024318ae9099af0373a3776189c52",
+   "src_unchanged": true
+  }
+ ]
 }

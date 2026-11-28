@@ -162,6 +162,23 @@ class RAFTForecasterLLM(TFLLMForecaster):
                           "td_patch_embeddings": td, "x_patched_in": x_patched, "x_raw_in": x_raw}
 
 
+def release_graph(compute_losses):
+    """
+    Amendment A1 (2026-11-24). Returns compute_losses with the returned task_loss and forecast detached.
+    The projected RAFT update computes its gradients inside compute_losses (src/raft.py); the forecasting
+    gradient is taken with retain_graph=True, so the forward graph through GPT-2 stays alive as long as the
+    returned task_loss / forecast reference it, i.e. until the next step has built its own graph. With the
+    GPT-2 forecaster E this holds two steps of activations at once (CUDA out of memory on a 16 GB T4).
+    Detaching the two returned tensors releases the graph at the end of the step. train() only reads
+    them with .item(); the loss values, gradients and parameter updates are unchanged.
+    """
+    def wrapped(*a, **k):
+        out = compute_losses(*a, **k)
+        return {key: (v.detach() if key in ("task_loss", "forecast") and torch.is_tensor(v) else v)
+                for key, v in out.items()}
+    return wrapped
+
+
 def build_raft_model_any(d_emb=64, patch_len=16, num_features=7, pred_len=96, num_prompt_tokens=10, use_revin=True,
                          seq_len=512, *, head_type, use_llm, llm_policy):
     """src/raft.build_raft_model for F; the same components with the GPT-2 backbone for E."""
